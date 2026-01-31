@@ -1,0 +1,131 @@
+#!/bin/bash
+# milanctl - Milan Service Controller
+
+# Resolve symlink to find actual directory
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+MILAN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+PIDFILE="$MILAN_DIR/milan.pid"
+LOGFILE="$MILAN_DIR/milan.log"
+
+# Dylan master URL for identity verification (optional)
+# Set to empty string to disable identity check
+DYLAN_URL="${DYLAN_URL:-http://dy.lan/whoami}"
+
+# Check identity with Dylan before starting
+check_identity() {
+    if [ -z "$DYLAN_URL" ]; then
+        return 0  # Skip if not configured
+    fi
+
+    echo -n "Checking identity with Dylan... "
+    IDENTITY=$(curl -s --max-time 3 "$DYLAN_URL" 2>/dev/null)
+    CURL_EXIT=$?
+
+    if [ $CURL_EXIT -ne 0 ]; then
+        echo "FAILED (Dylan not reachable)"
+        echo "Set DYLAN_URL='' to disable identity check"
+        return 1
+    fi
+
+    # Check for error response (starts with "Error")
+    if [[ "$IDENTITY" == Error* ]] || [[ "$IDENTITY" == "Unknown"* ]]; then
+        echo "REJECTED"
+        echo "Dylan says: $IDENTITY"
+        echo "Check config/milan.yaml on Dylan"
+        return 1
+    fi
+
+    echo "OK - I am $IDENTITY"
+    # Extract just the name (before the space/parenthesis)
+    export MILAN_IDENTITY="${IDENTITY%% *}"
+    return 0
+}
+
+start() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "Milan already running (PID $(cat "$PIDFILE"))"
+        return 1
+    fi
+
+    # Verify identity with Dylan first
+    if ! check_identity; then
+        return 1
+    fi
+
+    cd "$MILAN_DIR"
+    nohup ruby milan.rb >> "$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE"
+    sleep 1
+
+    if kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "Milan started (PID $(cat "$PIDFILE"))"
+    else
+        echo "Failed to start Milan - check $LOGFILE"
+        rm -f "$PIDFILE"
+        return 1
+    fi
+}
+
+stop() {
+    if [ ! -f "$PIDFILE" ]; then
+        echo "Milan not running (no pidfile)"
+        return 1
+    fi
+
+    PID=$(cat "$PIDFILE")
+    if kill -0 "$PID" 2>/dev/null; then
+        kill "$PID"
+        sleep 1
+        echo "Milan stopped (PID $PID)"
+    else
+        echo "Milan not running (stale pidfile)"
+    fi
+    rm -f "$PIDFILE"
+}
+
+status() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "Milan running (PID $(cat "$PIDFILE"))"
+        curl -s "http://localhost:8080/" 2>/dev/null | head -1
+    else
+        echo "Milan not running"
+        return 1
+    fi
+}
+
+whoami() {
+    if [ -z "$DYLAN_URL" ]; then
+        echo "Identity check disabled (DYLAN_URL not set)"
+        return 1
+    fi
+
+    IDENTITY=$(curl -s --max-time 3 "$DYLAN_URL" 2>/dev/null)
+    if [ $? -eq 0 ] && [[ "$IDENTITY" != Error* ]] && [[ "$IDENTITY" != "Unknown"* ]]; then
+        echo "$IDENTITY"
+    else
+        echo "Unknown or not configured in Dylan"
+        echo "Response: $IDENTITY"
+        return 1
+    fi
+}
+
+case "$1" in
+    start)
+        [[ "$2" == "--standalone" ]] && DYLAN_URL=""
+        start
+        ;;
+    stop)    stop ;;
+    restart)
+        [[ "$2" == "--standalone" ]] && DYLAN_URL=""
+        stop; sleep 1; start
+        ;;
+    status)  status ;;
+    log)     tail -f "$LOGFILE" ;;
+    whoami)  whoami ;;
+    *)       echo "Usage: milanctl {start|stop|restart|status|log|whoami} [--standalone]" ;;
+esac

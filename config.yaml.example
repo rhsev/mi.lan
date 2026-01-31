@@ -1,0 +1,14 @@
+# Milan Configuration
+# Copy to config.yaml and adjust IPs
+
+milan:
+  port: 8080
+
+  # IPs allowed to trigger scripts (e.g. Dylan master)
+  # Localhost is always allowed
+  # Wildcards supported: "192.168.1.*"
+  allowed_ips:
+    - "192.168.1.*"       # Local subnet
+    # - "100.64.1.5"      # Tailscale IP
+
+  scripts_dir: "./scripts"
