@@ -2,3 +2,6 @@ config.yaml
 milan.log
 milan.pid
 Gemfile.lock
+archive/
+MilanOpener/MilanOpener.app/
+scripts/mail.rb

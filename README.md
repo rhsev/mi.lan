@@ -71,6 +71,25 @@ Standalone (Local):
 * `http://localhost:8080/hello/World` runs `scripts/hello.rb` with "World" as `ARGV[0]` locally on your Mac
 * `http://localhost:8080` sends status information
 
+Via MilanOpener (URL Scheme):
+
+* `milan://mail/message-id` opens a mail in MailMate or DEVONthink — no browser window
+* `milan://hello/World` runs `scripts/hello.rb` — same as the HTTP call, but without opening Safari
+
+MilanOpener is a minimal Swift app that registers the `milan://` URL scheme and forwards requests to the local Milan agent. It runs as a background-only app (no dock icon, no window).
+
+Build and install:
+
+```bash
+cd MilanOpener
+mkdir -p MilanOpener.app/Contents/MacOS
+swiftc -o MilanOpener.app/Contents/MacOS/MilanOpener MilanOpener.swift -framework AppKit
+cp Info.plist MilanOpener.app/Contents/Info.plist
+cp -R MilanOpener.app ~/Applications/
+```
+
+macOS automatically registers the `milan://` URL scheme when the app is placed in `~/Applications/`.
+
 ## Service Control (milanctl)
 
 ```bash
