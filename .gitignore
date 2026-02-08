@@ -5,3 +5,4 @@ Gemfile.lock
 archive/
 MilanOpener/MilanOpener.app/
 scripts/mail.rb
+scripts/dt.rb

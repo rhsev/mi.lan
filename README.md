@@ -73,10 +73,10 @@ Standalone (Local):
 
 Via MilanOpener (URL Scheme):
 
-* `milan://mail/message-id` opens a mail in MailMate or DEVONthink — no browser window
 * `milan://hello/World` runs `scripts/hello.rb` — same as the HTTP call, but without opening Safari
+* `ref://` works the same way, but is intended for document references rather than script execution
 
-MilanOpener is a minimal Swift app that registers the `milan://` URL scheme and forwards requests to the local Milan agent. It runs as a background-only app (no dock icon, no window).
+MilanOpener is a minimal Swift app that registers the `milan://` and `ref://` URL schemes and forwards requests to the local Milan agent. It runs as a background-only app (no dock icon, no window).
 
 Build and install:
 
@@ -88,7 +88,7 @@ cp Info.plist MilanOpener.app/Contents/Info.plist
 cp -R MilanOpener.app ~/Applications/
 ```
 
-macOS automatically registers the `milan://` URL scheme when the app is placed in `~/Applications/`.
+macOS automatically registers the URL schemes when the app is placed in `~/Applications/`. When updating, always copy `Info.plist` into the app bundle before installing — `swiftc` only compiles the binary, it does not update the plist.
 
 ## Service Control (milanctl)
 
