@@ -1,131 +1,148 @@
-#!/bin/bash
-# milanctl - Milan Service Controller
+#!/usr/bin/env ruby
+# frozen_string_literal: true
 
-# Resolve symlink to find actual directory
-SOURCE="$0"
-while [ -L "$SOURCE" ]; do
-    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-    SOURCE="$(readlink "$SOURCE")"
-    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
-done
-MILAN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-PIDFILE="$MILAN_DIR/milan.pid"
-LOGFILE="$MILAN_DIR/milan.log"
+require 'pathname'
+require 'net/http'
+require 'uri'
+require 'fileutils'
+require 'json'
 
-# Dylan master URL for identity verification (optional)
-# Set to empty string to disable identity check
-DYLAN_URL="${DYLAN_URL:-http://dy.lan/whoami}"
+# Paths and constants
+MILAN_DIR   = Pathname.new(__FILE__).realpath.dirname
+MILAN_PATH  = MILAN_DIR.join("milan.rb")
+PID_FILE    = MILAN_DIR.join("milan.pid")
+LOG_FILE    = MILAN_DIR.join("milan.log")
 
-# Check identity with Dylan before starting
-check_identity() {
-    if [ -z "$DYLAN_URL" ]; then
-        return 0  # Skip if not configured
-    fi
+@dylan_url = ENV.fetch("DYLAN_URL", "http://dy.lan/whoami")
 
-    echo -n "Checking identity with Dylan... "
-    IDENTITY=$(curl -s --max-time 3 "$DYLAN_URL" 2>/dev/null)
-    CURL_EXIT=$?
+def check_identity
+  if @dylan_url.to_s.empty?
+    ENV["MILAN_IDENTITY"] ||= "standalone"
+    return true
+  end
 
-    if [ $CURL_EXIT -ne 0 ]; then
-        echo "FAILED (Dylan not reachable)"
-        echo "Set DYLAN_URL='' to disable identity check"
-        return 1
-    fi
+  print "Checking identity with Dylan... "
 
-    # Check for error response (starts with "Error")
-    if [[ "$IDENTITY" == Error* ]] || [[ "$IDENTITY" == "Unknown"* ]]; then
-        echo "REJECTED"
-        echo "Dylan says: $IDENTITY"
-        echo "Check config/milan.yaml on Dylan"
-        return 1
-    fi
+  uri = URI(@dylan_url)
+  response = Net::HTTP.start(uri.host, uri.port, open_timeout: 3, read_timeout: 3) do |http|
+    http.get(uri.request_uri)
+  end
 
-    echo "OK - I am $IDENTITY"
-    # Extract just the name (before the space/parenthesis)
-    export MILAN_IDENTITY="${IDENTITY%% *}"
-    return 0
-}
+  identity = response.body.strip
 
-start() {
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-        echo "Milan already running (PID $(cat "$PIDFILE"))"
-        return 1
-    fi
+  if identity.start_with?("Error", "Unknown")
+    puts "REJECTED\nDylan says: #{identity}"
+    return false
+  end
 
-    # Verify identity with Dylan first
-    if ! check_identity; then
-        return 1
-    fi
+  puts "OK - I am #{identity}"
+  ENV["MILAN_IDENTITY"] = identity.split(/\s+/).first
+  true
+rescue StandardError => e
+  puts "FAILED (Dylan not reachable: #{e.message})"
+  false
+end
 
-    cd "$MILAN_DIR"
-    nohup ruby milan.rb >> "$LOGFILE" 2>&1 &
-    echo $! > "$PIDFILE"
+def running?
+  return false unless PID_FILE.exist?
+
+  pid = PID_FILE.read.to_i
+  Process.kill(0, pid) # Check existence without side effects
+  pid
+rescue Errno::ESRCH, Errno::ENOENT
+  false
+end
+
+def start
+  if (pid = running?)
+    puts "Milan already running (PID #{pid})"
+    return
+  end
+
+  # Pre-check: does the app exist?
+  unless MILAN_PATH.exist?
+    puts "Error: #{MILAN_PATH} not found. Cannot start."
+    return
+  end
+
+  return unless check_identity
+
+  # Spawn in own process group with output redirection
+  pid = spawn("ruby #{MILAN_PATH}",
+              chdir: MILAN_DIR.to_s,
+              out: [LOG_FILE.to_s, "a"],
+              err: [:child, :out],
+              pgroup: true)
+
+  Process.detach(pid)
+  PID_FILE.write(pid)
+
+  sleep 1
+
+  if running?
+    puts "Milan started (PID #{pid})"
+  else
+    puts "Failed to start Milan - check #{LOG_FILE}"
+    PID_FILE.delete if PID_FILE.exist?
+  end
+end
+
+def stop
+  unless (pid = running?)
+    puts "Milan not running"
+    PID_FILE.delete if PID_FILE.exist?
+    return
+  end
+
+  puts "Stopping Milan (PID #{pid})..."
+  Process.kill("TERM", pid)
+
+  # Wait for graceful exit, then force kill
+  5.times do
     sleep 1
+    unless running?
+      PID_FILE.delete
+      puts "Stopped."
+      return
+    end
+  end
 
-    if kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-        echo "Milan started (PID $(cat "$PIDFILE"))"
-    else
-        echo "Failed to start Milan - check $LOGFILE"
-        rm -f "$PIDFILE"
-        return 1
-    fi
-}
+  puts "Process still alive, sending KILL..."
+  Process.kill("KILL", pid) rescue nil
+  PID_FILE.delete if PID_FILE.exist?
+end
 
-stop() {
-    if [ ! -f "$PIDFILE" ]; then
-        echo "Milan not running (no pidfile)"
-        return 1
-    fi
+def status
+  unless (pid = running?)
+    puts "Milan not running"
+    return
+  end
 
-    PID=$(cat "$PIDFILE")
-    if kill -0 "$PID" 2>/dev/null; then
-        kill "$PID"
-        sleep 1
-        echo "Milan stopped (PID $PID)"
-    else
-        echo "Milan not running (stale pidfile)"
-    fi
-    rm -f "$PIDFILE"
-}
+  puts "Milan running (PID #{pid})"
 
-status() {
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-        echo "Milan running (PID $(cat "$PIDFILE"))"
-        curl -s "http://localhost:8080/" 2>/dev/null | head -1
-    else
-        echo "Milan not running"
-        return 1
-    fi
-}
+  begin
+    uri = URI("http://localhost:8080/")
+    # Quick internal healthcheck
+    response = Net::HTTP.start(uri.host, uri.port, open_timeout: 1, read_timeout: 1) { _1.get(uri.request_uri) }
 
-whoami() {
-    if [ -z "$DYLAN_URL" ]; then
-        echo "Identity check disabled (DYLAN_URL not set)"
-        return 1
-    fi
+    data = JSON.parse(response.body, symbolize_names: true)
+    puts "Uptime: #{data[:uptime_seconds]}s | Requests: #{data[:requests]} | Scripts: #{data[:scripts_run]}"
+  rescue StandardError
+    puts "Service reachable, but port 8080 does not respond with valid JSON."
+  end
+end
 
-    IDENTITY=$(curl -s --max-time 3 "$DYLAN_URL" 2>/dev/null)
-    if [ $? -eq 0 ] && [[ "$IDENTITY" != Error* ]] && [[ "$IDENTITY" != "Unknown"* ]]; then
-        echo "$IDENTITY"
-    else
-        echo "Unknown or not configured in Dylan"
-        echo "Response: $IDENTITY"
-        return 1
-    fi
-}
+# CLI
+command = ARGV.shift
+@dylan_url = "" if ARGV.include?("--standalone")
 
-case "$1" in
-    start)
-        [[ "$2" == "--standalone" ]] && DYLAN_URL=""
-        start
-        ;;
-    stop)    stop ;;
-    restart)
-        [[ "$2" == "--standalone" ]] && DYLAN_URL=""
-        stop; sleep 1; start
-        ;;
-    status)  status ;;
-    log)     tail -f "$LOGFILE" ;;
-    whoami)  whoami ;;
-    *)       echo "Usage: milanctl {start|stop|restart|status|log|whoami} [--standalone]" ;;
-esac
+case command
+when "start"   then start
+when "stop"    then stop
+when "restart" then stop; start
+when "status"  then status
+when "log"     then exec "tail -f #{LOG_FILE}"
+when "whoami"  then check_identity
+else
+  puts "Usage: #{$PROGRAM_NAME} {start|stop|restart|status|log|whoami} [--standalone]"
+end
