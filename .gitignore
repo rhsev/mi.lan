@@ -6,4 +6,6 @@ archive/
 MilanOpener/MilanOpener.app/
 scripts/mail.rb
 scripts/dt.rb
+scripts/wezopen.rb
+scripts/ghostty.rb
 *.DS_Store

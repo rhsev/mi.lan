@@ -25,7 +25,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let argument = url.path
 
         let milanPath = "/\(script)\(argument)"
-        let milanURL = "http://localhost:8080\(milanPath)"
+        let encodedPath = milanPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? milanPath
+        let milanURL = "http://localhost:8080\(encodedPath)"
 
         NSLog("MilanOpener: \(urlString) → \(milanURL)")
 
