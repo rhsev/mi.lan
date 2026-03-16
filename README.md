@@ -2,7 +2,7 @@
 
 A lightweight URL bridge for macOS automation.
 
-Milan is a HTTP agent designed to execute local Ruby scripts and Apple Shortcuts via simple URL calls. It acts as a persistent bridge, allowing you to trigger local automation from any HTTP-capable source (browser, curl, Stream Deck, or other scripts).
+Milan is a HTTP agent designed to execute local scripts and Apple Shortcuts via simple URL calls. It acts as a persistent bridge, allowing you to trigger local automation from any HTTP-capable source (browser, curl, Stream Deck, or other scripts).
 
 It can do both:
 
@@ -12,7 +12,7 @@ It can do both:
 ## Why Milan?
 
 * URL Triggers: Turn any local script into an HTTP endpoint instantly.
-* Speed: Persistent agent design ensures execution in ~120ms for Ruby scripts (and ~1 sec for Shortcuts).
+* Speed: Persistent agent design ensures execution in ~120ms for scripts (and ~1 sec for Shortcuts).
 * Simplicity: One Ruby script, minimal dependencies (async-http).
 * Privacy: Strict IP allow-listing and no external cloud services.
 * Reach: Reach your Mac via Dylan from any network (LAN/VPN).
@@ -105,20 +105,36 @@ macOS automatically registers the URL schemes when the app is placed in `~/Appli
 
 ## Writing Scripts
 
-Scripts are executable files in `./scripts/`. They receive URL path segments as arguments.
+Scripts live in `./scripts/` and receive URL path segments as arguments. Supported types:
 
-Example `scripts/hello.rb`:
+| Extension | Interpreter |
+|-----------|-------------|
+| `.rb`     | Ruby        |
+| `.sh`     | sh          |
+| `.py`     | python3     |
+| (none)    | direct (needs executable bit) |
+
+Apple Shortcuts are handled by `scripts/shortcut.rb` via the `shortcuts` CLI — no special extension needed.
+
+Examples:
 
 ```ruby
+# scripts/hello.rb
 #!/usr/bin/env ruby
 name = ARGV[0] || 'World'
 puts "Hello, #{name}!"
+```
 
+```bash
+# scripts/greet.sh
+#!/bin/sh
+echo "Hello, ${1:-World}!"
 ```
 
 Rules:
 
 * Script names: `[a-z0-9_-]` only
+* One script per name — `hello.rb` and `hello.sh` together cause a 500 error
 * Timeout: 5 seconds
 * stdout -> HTTP response
 * Exit code != 0 -> HTTP 422

@@ -31,6 +31,7 @@ BasicSocket.do_not_reverse_lookup = true
 
 module Milan
   VERSION = '1.0.0'
+  SCRIPT_EXTENSIONS = %w[.rb .sh .py].freeze
 
   # ==========================================================================
   # Config - Loads configuration from YAML
@@ -178,10 +179,23 @@ module Milan
       Response.json({ scripts: scripts })
     end
 
+    def find_script(script_name)
+      matches = SCRIPT_EXTENSIONS.map { |ext|
+        File.join(@config.scripts_dir, "#{script_name}#{ext}")
+      }.select { |f| File.exist?(f) }
+
+      case matches.size
+      when 0 then nil
+      when 1 then matches.first
+      else raise "Ambiguous script '#{script_name}': #{matches.map { |f| File.basename(f) }.join(', ')}"
+      end
+    end
+
     def list_available_scripts
-      Dir.glob(File.join(@config.scripts_dir, '*.rb'))
-         .map { |f| File.basename(f, '.rb') }
-         .sort
+      SCRIPT_EXTENSIONS.flat_map { |ext|
+        Dir.glob(File.join(@config.scripts_dir, "*#{ext}"))
+      }.map { |f| File.basename(f, File.extname(f)) }
+       .sort.uniq
     end
 
     # Execute script (synchronous with timeout)
@@ -192,9 +206,9 @@ module Milan
         return Response.forbidden("Invalid script name")
       end
 
-      script_path = File.join(@config.scripts_dir, "#{script_name}.rb")
+      script_path = find_script(script_name)
 
-      unless File.exist?(script_path)
+      unless script_path
         log(:warn, "Script not found: #{script_name}")
         return Response.not_found("Script '#{script_name}' not found")
       end
@@ -227,7 +241,13 @@ module Milan
       status = nil
 
       Timeout.timeout(5) do
-        IO.popen([RbConfig.ruby, script_path, argument], err: [:child, :out]) do |io|
+        cmd = case File.extname(script_path)
+              when '.rb' then [RbConfig.ruby, script_path, argument]
+              when '.sh' then ['sh', script_path, argument]
+              when '.py' then ['python3', script_path, argument]
+              else [script_path, argument]
+              end
+        IO.popen(cmd, err: [:child, :out]) do |io|
           output = io.read
         end
         status = $?

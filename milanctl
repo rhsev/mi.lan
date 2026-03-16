@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require 'pathname'
+require 'rbconfig'
 require 'net/http'
 require 'uri'
 require 'fileutils'
@@ -68,7 +69,7 @@ def start
   return unless check_identity
 
   # Spawn in own process group with output redirection
-  pid = spawn("ruby #{MILAN_PATH}",
+  pid = spawn("#{RbConfig.ruby} #{MILAN_PATH}",
               chdir: MILAN_DIR.to_s,
               out: [LOG_FILE.to_s, "a"],
               err: [:child, :out],
