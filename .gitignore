@@ -1,11 +1,9 @@
 config.yaml
+config/crontab
 milan.log
 milan.pid
 Gemfile.lock
 archive/
 MilanOpener/MilanOpener.app/
-scripts/mail.rb
-scripts/dt.rb
-scripts/wezopen.rb
-scripts/ghostty.rb
+scripts/
 *.DS_Store

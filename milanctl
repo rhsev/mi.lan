@@ -44,14 +44,36 @@ rescue StandardError => e
   false
 end
 
+MILAN_PORT = 8080
+
 def running?
   return false unless PID_FILE.exist?
-
   pid = PID_FILE.read.to_i
-  Process.kill(0, pid) # Check existence without side effects
+  Process.kill(0, pid)
   pid
 rescue Errno::ESRCH, Errno::ENOENT
   false
+end
+
+# PIDs of any process bound to MILAN_PORT (may differ from PID file)
+def port_pids
+  `lsof -ti:#{MILAN_PORT} 2>/dev/null`.strip.split("\n").map(&:to_i).reject(&:zero?)
+rescue
+  []
+end
+
+def port_free?
+  port_pids.empty?
+end
+
+# TERM then KILL anything still on the port
+def clear_port
+  pids = port_pids
+  return if pids.empty?
+  pids.each { |p| Process.kill("TERM", p) rescue nil }
+  5.times { sleep 1; return if port_pids.empty? }
+  port_pids.each { |p| Process.kill("KILL", p) rescue nil }
+  sleep 0.5
 end
 
 def start
@@ -60,15 +82,23 @@ def start
     return
   end
 
-  # Pre-check: does the app exist?
   unless MILAN_PATH.exist?
     puts "Error: #{MILAN_PATH} not found. Cannot start."
     return
   end
 
+  # Ensure port is free before spawning
+  unless port_free?
+    puts "Port #{MILAN_PORT} in use — clearing..."
+    clear_port
+    unless port_free?
+      puts "Cannot free port #{MILAN_PORT}. Aborting."
+      return
+    end
+  end
+
   return unless check_identity
 
-  # Spawn in own process group with output redirection
   pid = spawn("#{RbConfig.ruby} #{MILAN_PATH}",
               chdir: MILAN_DIR.to_s,
               out: [LOG_FILE.to_s, "a"],
@@ -78,10 +108,23 @@ def start
   Process.detach(pid)
   PID_FILE.write(pid)
 
-  sleep 1
+  # Poll HTTP health instead of just PID existence
+  8.times do
+    sleep 0.5
+    begin
+      uri = URI("http://localhost:#{MILAN_PORT}/health")
+      res = Net::HTTP.start(uri.host, uri.port, open_timeout: 1, read_timeout: 1) { _1.get(uri.path) }
+      if res.code == "200"
+        puts "Milan started (PID #{pid})"
+        return
+      end
+    rescue
+      # not yet ready, keep waiting
+    end
+  end
 
   if running?
-    puts "Milan started (PID #{pid})"
+    puts "Milan started (PID #{pid}) — port not yet responding"
   else
     puts "Failed to start Milan - check #{LOG_FILE}"
     PID_FILE.delete if PID_FILE.exist?
@@ -89,28 +132,26 @@ def start
 end
 
 def stop
-  unless (pid = running?)
-    puts "Milan not running"
+  pid = running?
+
+  if pid
+    puts "Stopping Milan (PID #{pid})..."
+    Process.kill("TERM", pid) rescue nil
+    5.times { sleep 1; break unless running? }
+    Process.kill("KILL", pid) rescue nil
     PID_FILE.delete if PID_FILE.exist?
-    return
+  else
+    puts "Milan not running (no PID file)"
+    PID_FILE.delete if PID_FILE.exist?
   end
 
-  puts "Stopping Milan (PID #{pid})..."
-  Process.kill("TERM", pid)
-
-  # Wait for graceful exit, then force kill
-  5.times do
-    sleep 1
-    unless running?
-      PID_FILE.delete
-      puts "Stopped."
-      return
-    end
+  # Safety net: clear anything still on the port
+  unless port_free?
+    puts "Clearing stale process on port #{MILAN_PORT}..."
+    clear_port
   end
 
-  puts "Process still alive, sending KILL..."
-  Process.kill("KILL", pid) rescue nil
-  PID_FILE.delete if PID_FILE.exist?
+  puts "Stopped."
 end
 
 def status
