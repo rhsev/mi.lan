@@ -71,6 +71,53 @@ Standalone (Local):
 * `http://localhost:8080/hello/World` runs `scripts/hello.rb` with "World" as `ARGV[0]` locally on your Mac
 * `http://localhost:8080` sends status information
 
+## Streaming
+
+Scripts can stream output line by line via SSE (Server-Sent Events):
+
+```
+GET /stream/<script>
+GET /stream/<script>/<arg>
+```
+
+The response is a `text/event-stream`. Each line of stdout is sent as a `data:` event. When the script finishes, Milan sends `event: done`. On non-zero exit: `event: stream_error`.
+
+**Background mode:** If the client disconnects mid-stream, Milan switches to silent mode — the script continues running, collects output into a log file, and records a background job entry when it finishes.
+
+## Background Jobs
+
+When a stream is abandoned, Milan records the job in `data/jobs/status.json`:
+
+```
+GET /jobs/all       → all job records (JSON)
+GET /jobs/pending   → unacknowledged jobs
+GET /jobs/ack/<id>  → mark job as acknowledged
+```
+
+Jobs are identified by `<script>_<timestamp>` and include script name, exit status, log path, timestamp, and acknowledged flag. History is capped at 100 entries.
+
+## Notes / Wiki
+
+Milan can serve Markdown and HTML files from configured directories:
+
+```
+GET /notes                          → list sources (JSON)
+GET /notes/<source>                 → list files in source (JSON)
+GET /notes/<source>/<file>          → render file (HTML)
+GET /notes/<source>/assets/<path>   → serve asset (image or CSS)
+```
+
+Markdown files are rendered via [Apex](https://github.com/ttscoff/apex). HTML files are served as-is. Both `images/` and `css/` subdirectories are served as assets.
+
+Configure sources in `config.yaml`:
+
+```yaml
+milan:
+  notes:
+    - id: my-notes
+      path: /path/to/notes/directory
+```
+
 Via MilanOpener (URL Scheme):
 
 * `milan://hello/World` runs `scripts/hello.rb` — same as the HTTP call, but without opening Safari
@@ -100,8 +147,9 @@ macOS automatically registers the URL schemes when the app is placed in `~/Appli
 ./milanctl status               # Show status and PID
 ./milanctl log                  # Tail the log file
 ./milanctl whoami               # Check identity with Dylan
-
 ```
+
+`milanctl` is reliable across restarts: it detects stale PID files, clears any process holding the port (via `lsof`), and waits for the HTTP health endpoint to respond before reporting success.
 
 ## Writing Scripts
 
@@ -135,9 +183,9 @@ Rules:
 
 * Script names: `[a-z0-9_-]` only
 * One script per name — `hello.rb` and `hello.sh` together cause a 500 error
-* Timeout: 5 seconds
-* stdout -> HTTP response
-* Exit code != 0 -> HTTP 422
+* Timeout: 5 seconds (synchronous execution); no timeout for streams
+* stdout → HTTP response
+* Exit code != 0 → HTTP 422
 
 ## Security
 
