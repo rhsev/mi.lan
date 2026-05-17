@@ -43,7 +43,7 @@ module Milan
   # Config - Loads configuration from YAML
   # ==========================================================================
   class Config
-    attr_reader :port, :allowed_ips, :scripts_dir, :cheaters_dir, :notes
+    attr_reader :port, :allowed_ips, :scripts_dir, :cheaters_dir, :notes, :cron_interval
 
     def initialize(config_path = nil)
       config_path ||= File.join(__dir__, 'config.yaml')
@@ -55,6 +55,7 @@ module Milan
       @scripts_dir   = milan_config['scripts_dir'] || './scripts'
       @cheaters_dir  = milan_config['cheaters_dir'].to_s.strip
       @notes         = Array(milan_config['notes'])
+      @cron_interval = (milan_config['cron_interval'] || 300).to_i
 
       # Create scripts directory if missing
       FileUtils.mkdir_p(scripts_dir)
@@ -561,9 +562,12 @@ if __FILE__ == $PROGRAM_NAME
     config = Milan::Config.new
     server = Milan::Server.new(config)
 
+    cron_script = File.join(__dir__, 'scripts', 'cron-runner.rb')
+
     puts "Port:        #{config.port}"
     puts "Scripts:     #{config.scripts_dir}"
     puts "Allowed IPs: #{config.allowed_ips.join(', ')}"
+    puts "Cron:        every #{config.cron_interval}s" if File.exist?(cron_script)
     puts "─" * 40
     puts "Endpoints:"
     puts "  GET /                    Status (JSON)"
@@ -588,6 +592,17 @@ if __FILE__ == $PROGRAM_NAME
       Async::HTTP::Server.for(endpoint) do |request|
         server.call(request)
       end.run
+
+      if File.exist?(cron_script)
+        Async do
+          loop do
+            sleep config.cron_interval
+            ts = Time.now.strftime('%H:%M:%S')
+            puts "[#{ts}] \e[32mINFO\e[0m cron tick"
+            IO.popen([RbConfig.ruby, cron_script], err: [:child, :out]) { |io| io.read }
+          end
+        end
+      end
     end
 
   rescue Interrupt

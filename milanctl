@@ -57,23 +57,44 @@ end
 
 # PIDs of any process bound to MILAN_PORT (may differ from PID file)
 def port_pids
-  `lsof -ti:#{MILAN_PORT} 2>/dev/null`.strip.split("\n").map(&:to_i).reject(&:zero?)
+  pids = `lsof -ti:#{MILAN_PORT} 2>/dev/null`.strip.split("\n").map(&:to_i).reject(&:zero?)
+  return pids unless pids.empty?
+  # lsof misses long-running detached processes on macOS; fall back to pgrep
+  return [] if port_free?
+  `pgrep -f 'milan\\.rb' 2>/dev/null`.strip.split("\n").map(&:to_i).reject(&:zero?)
 rescue
   []
 end
 
 def port_free?
-  port_pids.empty?
+  require 'socket'
+  TCPServer.new('0.0.0.0', MILAN_PORT).close
+  true
+rescue Errno::EADDRINUSE
+  false
 end
 
 # TERM then KILL anything still on the port
 def clear_port
   pids = port_pids
   return if pids.empty?
-  pids.each { |p| Process.kill("TERM", p) rescue nil }
+
+  pids.each do |p|
+    begin
+      Process.kill("TERM", p)
+    rescue Errno::EPERM
+      owner = `ps -p #{p} -o user=`.strip
+      puts "Cannot kill PID #{p} — owned by '#{owner}', not '#{`id -un`.strip}'"
+      puts "  sudo kill -9 #{p}"
+      return
+    rescue Errno::ESRCH
+      # already gone
+    end
+  end
+
   5.times { sleep 1; return if port_pids.empty? }
   port_pids.each { |p| Process.kill("KILL", p) rescue nil }
-  sleep 0.5
+  10.times { sleep 0.2; return if port_pids.empty? }
 end
 
 def start
@@ -99,7 +120,7 @@ def start
 
   return unless check_identity
 
-  pid = spawn("#{RbConfig.ruby} #{MILAN_PATH}",
+  pid = spawn(RbConfig.ruby, MILAN_PATH.to_s,
               chdir: MILAN_DIR.to_s,
               out: [LOG_FILE.to_s, "a"],
               err: [:child, :out],
@@ -108,9 +129,14 @@ def start
   Process.detach(pid)
   PID_FILE.write(pid)
 
-  # Poll HTTP health instead of just PID existence
+  # Poll health; abort early if our process already died
   8.times do
     sleep 0.5
+    unless (Process.kill(0, pid) rescue false)
+      puts "Failed to start Milan - process exited early, check #{LOG_FILE}"
+      PID_FILE.delete if PID_FILE.exist?
+      return
+    end
     begin
       uri = URI("http://localhost:#{MILAN_PORT}/health")
       res = Net::HTTP.start(uri.host, uri.port, open_timeout: 1, read_timeout: 1) { _1.get(uri.path) }
