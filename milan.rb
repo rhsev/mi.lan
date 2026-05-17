@@ -335,6 +335,9 @@ module Milan
 
       html = case ext
              when '.md'
+               unless system('which apex > /dev/null 2>&1')
+                 return Response.error(503, "apex not found — install via: gem install apex")
+               end
                # Strip Cheaters-style JSON frontmatter if present
                md = raw.include?('%%%END') ? raw.split('%%%END', 2).last.strip : raw
                stdout, = Open3.capture2('apex', '--mode', 'gfm', stdin_data: md)
@@ -568,6 +571,9 @@ if __FILE__ == $PROGRAM_NAME
     puts "Scripts:     #{config.scripts_dir}"
     puts "Allowed IPs: #{config.allowed_ips.join(', ')}"
     puts "Cron:        every #{config.cron_interval}s" if File.exist?(cron_script)
+    if config.notes.any? && !system('which apex > /dev/null 2>&1')
+      puts "\e[33mWARN\e[0m  Notes configured but apex not found (gem install apex)"
+    end
     puts "─" * 40
     puts "Endpoints:"
     puts "  GET /                    Status (JSON)"
