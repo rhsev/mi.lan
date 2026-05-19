@@ -478,11 +478,33 @@ module Milan
               log_lines << line.chomp   # collect for logfile, don't stream
               next
             end
+
+            # Multi-step workflow marker: `MILAN_PROMPT <json>` als Skript-Output
+            # wird zu einem 'input_request'-Event statt eines normalen data-Events.
+            # Stage zeigt daraufhin ein Eingabefeld an und ruft beim Submit die
+            # angegebene `action`-URL als Folge-Script auf.
+            #
+            #   echo 'MILAN_PROMPT {"label":"Name","action":"/mini/hello"}'
+            #
+            # Die Marker-Zeile selbst wird aus dem sichtbaren Stream entfernt.
+            chomped = line.chomp
+            if chomped.start_with?('MILAN_PROMPT ')
+              payload = chomped.sub(/\AMILAN_PROMPT\s+/, '')
+              begin
+                body.write("event: input_request\ndata: #{payload}\n\n")
+              rescue
+                silent = true
+                log_lines << chomped
+                log(:info, "#{script_name} → background (#{job_id})")
+              end
+              next
+            end
+
             begin
-              body.write("data: #{line.chomp}\n\n")
+              body.write("data: #{chomped}\n\n")
             rescue
               silent = true             # client gone → background mode
-              log_lines << line.chomp
+              log_lines << chomped
               log(:info, "#{script_name} → background (#{job_id})")
             end
           end
