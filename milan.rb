@@ -191,15 +191,15 @@ module Milan
       when '/notes'
         Response.json(list_note_sources)
       when %r{^/notes/([^/]+)/assets/(.+)$}
-        source_id = Regexp.last_match(1)
-        asset_path = Regexp.last_match(2)
+        source_id  = URI.decode_www_form_component(Regexp.last_match(1))
+        asset_path = URI.decode_www_form_component(Regexp.last_match(2))
         serve_note_asset(source_id, asset_path)
       when %r{^/notes/([^/]+)/(.+)$}
-        source_id  = Regexp.last_match(1)
-        filename   = Regexp.last_match(2)
+        source_id  = URI.decode_www_form_component(Regexp.last_match(1))
+        filename   = URI.decode_www_form_component(Regexp.last_match(2))
         serve_note(source_id, filename)
       when %r{^/notes/([^/]+)/?$}
-        source_id = Regexp.last_match(1)
+        source_id = URI.decode_www_form_component(Regexp.last_match(1))
         Response.json(list_notes(source_id))
       when %r{^/stream/}
         # Streaming execution: /stream/script_name/argument
