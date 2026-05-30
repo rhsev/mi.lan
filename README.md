@@ -118,24 +118,12 @@ milan:
       path: /path/to/notes/directory
 ```
 
-Via MilanOpener (URL Scheme):
+Via URL Scheme:
 
 * `milan://hello/World` runs `scripts/hello.rb` — same as the HTTP call, but without opening Safari
 * `ref://` works the same way, but is intended for document references rather than script execution
 
-MilanOpener is a minimal Swift app that registers the `milan://` and `ref://` URL schemes and forwards requests to the local Milan agent. It runs as a background-only app (no dock icon, no window).
-
-Build and install:
-
-```bash
-cd MilanOpener
-mkdir -p MilanOpener.app/Contents/MacOS
-swiftc -o MilanOpener.app/Contents/MacOS/MilanOpener MilanOpener.swift -framework AppKit
-cp Info.plist MilanOpener.app/Contents/Info.plist
-cp -R MilanOpener.app ~/Applications/
-```
-
-macOS automatically registers the URL schemes when the app is placed in `~/Applications/`. When updating, always copy `Info.plist` into the app bundle before installing — `swiftc` only compiles the binary, it does not update the plist.
+The `milan://` and `ref://` URL schemes are handled by [ticker](https://github.com/rhsev/ticker), which registers them as part of its app bundle. No separate URL handler app is needed.
 
 ## Service Control (milanctl)
 
