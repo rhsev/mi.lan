@@ -2,8 +2,10 @@ config.yaml
 config/crontab
 milan.log
 milan.pid
-Gemfile.lock
-archive/
-MilanOpener/MilanOpener.app/
-scripts/
+milan
+main.go
+go.mod
+go.sum
+data/
+scripts/custom/
 *.DS_Store

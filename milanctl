@@ -8,6 +8,37 @@ require 'uri'
 require 'fileutils'
 require 'json'
 
+# Find a Ruby >= 3 to run milan.rb, regardless of how milanctl was invoked.
+# GUI apps (Bunch, Automator, LaunchAgent, …) get a stripped environment where
+# version managers are not initialized, so the invoking Ruby may be the old
+# macOS system Ruby. We search common locations before falling back.
+def find_ruby
+  return RbConfig.ruby if RUBY_VERSION.to_i >= 3
+
+  candidates = [
+    # rbenv (RBENV_ROOT override or default)
+    File.join(ENV.fetch('RBENV_ROOT', File.expand_path('~/.rbenv')), 'shims', 'ruby'),
+    # asdf
+    File.expand_path('~/.asdf/shims/ruby'),
+    # mise / rtx
+    File.expand_path('~/.local/share/mise/shims/ruby'),
+    File.expand_path('~/.mise/shims/ruby'),
+    # Homebrew (Apple Silicon / Intel)
+    '/opt/homebrew/bin/ruby',
+    '/usr/local/bin/ruby',
+  ]
+
+  candidates.each do |path|
+    next unless File.executable?(path)
+    version_line = `"#{path}" --version 2>/dev/null`.strip
+    major = version_line[/ruby (\d+)/, 1].to_i
+    return path if major >= 3
+  end
+
+  warn "Warning: could not find Ruby >= 3; milan.rb may fail to start."
+  RbConfig.ruby
+end
+
 # Paths and constants
 MILAN_DIR   = Pathname.new(__FILE__).realpath.dirname
 MILAN_PATH  = MILAN_DIR.join("milan.rb")
@@ -120,7 +151,9 @@ def start
 
   return unless check_identity
 
-  pid = spawn(RbConfig.ruby, MILAN_PATH.to_s,
+  ruby_bin = find_ruby
+
+  pid = spawn(ruby_bin, MILAN_PATH.to_s,
               chdir: MILAN_DIR.to_s,
               out: [LOG_FILE.to_s, "a"],
               err: [:child, :out],

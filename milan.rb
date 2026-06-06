@@ -243,23 +243,28 @@ module Milan
       Response.json({ scripts: scripts })
     end
 
-    def find_script(script_name)
-      matches = SCRIPT_EXTENSIONS.map { |ext|
-        File.join(@config.scripts_dir, "#{script_name}#{ext}")
-      }.select { |f| File.exist?(f) }
+    # custom/ takes priority over root scripts dir; both are searched explicitly
+    # (no recursive glob — subdirs other than custom/ remain invisible)
+    SCRIPT_SUBDIRS = ['custom', ''].freeze
 
-      case matches.size
-      when 0 then nil
-      when 1 then matches.first
-      else raise "Ambiguous script '#{script_name}': #{matches.map { |f| File.basename(f) }.join(', ')}"
+    def find_script(script_name)
+      SCRIPT_SUBDIRS.each do |subdir|
+        SCRIPT_EXTENSIONS.each do |ext|
+          path = File.join(*[@config.scripts_dir, subdir, "#{script_name}#{ext}"].reject(&:empty?))
+          return path if File.exist?(path)
+        end
       end
+      nil
     end
 
     def list_available_scripts
-      SCRIPT_EXTENSIONS.flat_map { |ext|
-        Dir.glob(File.join(@config.scripts_dir, "*#{ext}"))
-      }.map { |f| File.basename(f, File.extname(f)) }
-       .sort.uniq
+      seen = {}
+      SCRIPT_SUBDIRS.each do |subdir|
+        dir = File.join(*[@config.scripts_dir, subdir].reject(&:empty?))
+        SCRIPT_EXTENSIONS.flat_map { |ext| Dir.glob(File.join(dir, "*#{ext}")) }
+                         .each { |f| seen[File.basename(f, File.extname(f))] ||= true }
+      end
+      seen.keys.sort
     end
 
     # Execute script (synchronous with timeout)
