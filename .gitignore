@@ -3,9 +3,6 @@ config/crontab
 milan.log
 milan.pid
 milan
-main.go
-go.mod
-go.sum
 data/
 scripts/custom/
 *.DS_Store

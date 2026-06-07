@@ -13,7 +13,7 @@ It can do both:
 
 * URL Triggers: Turn any local script into an HTTP endpoint instantly.
 * Speed: Persistent agent design ensures execution in ~120ms for scripts (and ~1 sec for Shortcuts).
-* Simplicity: One Ruby script, minimal dependencies (async-http).
+* Simplicity: Single Go binary, no runtime dependencies.
 * Privacy: Strict IP allow-listing and no external cloud services.
 * Reach: Reach your Mac via Dylan from any network (LAN/VPN).
 * Security: Identity verification with the Dylan master at startup.
@@ -40,22 +40,21 @@ iPhone -> Dylan (Synology) -> Milan (Mac) -> Script -> Response
 ## Requirements
 
 * macOS (tested on Sequoia)
-* Ruby 3.1+ (tested with 3.3.10)
-* Gems: `async`, `async-http`
+* Go 1.21+ (to build)
+* Ruby 3+ (to run `.rb` scripts)
 
 ## Quick Start
 
 ```bash
-# Install gems
-gem install async async-http
+# Build
+go build -o milan .
 
 # Setup config
 cp config.yaml.example config.yaml
 # Edit config.yaml: add allowed IPs
 
 # Start Milan
-./milanctl start
-
+./milan start
 ```
 
 ## Usage Examples
@@ -125,23 +124,23 @@ Via URL Scheme:
 
 The `milan://` and `ref://` URL schemes are handled by [ticker](https://github.com/rhsev/ticker), which registers them as part of its app bundle. No separate URL handler app is needed.
 
-## Service Control (milanctl)
+## Service Control (milan)
 
 ```bash
-./milanctl start                # Start with Dylan identity check
-./milanctl start --standalone   # Start without Dylan
-./milanctl stop                 # Stop service
-./milanctl restart --standalone # Restart service
-./milanctl status               # Show status and PID
-./milanctl log                  # Tail the log file
-./milanctl whoami               # Check identity with Dylan
+./milan start                # Start with Dylan identity check
+./milan start --standalone   # Start without Dylan
+./milan stop                 # Stop service
+./milan restart --standalone # Restart service
+./milan status               # Show status and PID
+./milan log                  # Tail the log file
+./milan whoami               # Check identity with Dylan
 ```
 
-`milanctl` is reliable across restarts: it detects stale PID files, clears any process holding the port (via `lsof`), and waits for the HTTP health endpoint to respond before reporting success.
+`milan` is reliable across restarts: it detects stale PID files, clears any process holding the port (via `lsof`), and waits for the HTTP health endpoint to respond before reporting success.
 
 ## Writing Scripts
 
-Scripts live in `./scripts/` and receive URL path segments as arguments. Supported types:
+Scripts live in `./scripts/` (or `./scripts/custom/` for private scripts, gitignored) and receive URL path segments as arguments. Supported types:
 
 | Extension | Interpreter |
 |-----------|-------------|
