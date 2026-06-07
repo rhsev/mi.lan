@@ -46,7 +46,7 @@ iPhone -> Dylan (Synology) -> Milan (Mac) -> Script -> Response
 ## Quick Start
 
 ```bash
-# Build
+# Download binary from releases, or build from source:
 go build -o milan .
 
 # Setup config
