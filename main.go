@@ -39,7 +39,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const version = "2.0.0"
+const version = "2.0.1"
 
 var (
 	scriptExtensions = []string{".rb", ".sh", ".py"}
@@ -116,8 +116,6 @@ func loadConfig() (*Config, error) {
 	os.MkdirAll(m.ScriptsDir, 0o755)
 	return &cfg, nil
 }
-
-var wildcardDigits = regexp.MustCompile(`\\d\+`) // unused but kept for clarity
 
 func (c *Config) allowed(ip string) bool {
 	if ip == "127.0.0.1" || ip == "::1" {
@@ -388,6 +386,9 @@ func runScript(scriptPath, argument string) (output string, ok bool, timedOut bo
 
 	args := buildCmd(scriptPath, argument)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// Forked Hintergrundprozesse erben stdout — ohne WaitDelay würde
+	// CombinedOutput trotz Timeout auf Pipe-EOF warten.
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	output = strings.TrimSpace(string(out))
 
@@ -433,7 +434,13 @@ func (s *Server) streamScript(w http.ResponseWriter, r *http.Request, scriptName
 	}
 
 	args := buildCmd(scriptPath, argument)
-	cmd := exec.Command(args[0], args[1:]...)
+	// Bewusst kein kurzes Timeout — Streams dürfen als Hintergrund-Job
+	// weiterlaufen. Die 1h-Obergrenze fängt nur echt hängende Skripte ab,
+	// deren Goroutine sonst für immer in Wait() stecken bliebe.
+	runCtx, cancelRun := context.WithTimeout(context.Background(), time.Hour)
+	defer cancelRun()
+	cmd := exec.CommandContext(runCtx, args[0], args[1:]...)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 	if err := cmd.Start(); err != nil {
@@ -446,25 +453,43 @@ func (s *Server) streamScript(w http.ResponseWriter, r *http.Request, scriptName
 
 	ctx := r.Context()
 	silent := false
-	var logLines []string
 	jobID := fmt.Sprintf("%s_%s", scriptName, time.Now().Format("20060102_150405"))
+	jobLogPath := filepath.Join(jobsDir, jobID+".log")
+
+	// Hintergrund-Ausgabe streamt direkt ins Job-Log auf Platte — ein
+	// unbegrenzter In-Memory-Puffer wäre bei dauerschreibenden Skripten
+	// ein OOM-Risiko.
+	var jobLog *os.File
+	goSilent := func() {
+		if silent {
+			return
+		}
+		silent = true
+		os.MkdirAll(jobsDir, 0o755)
+		f, err := os.Create(jobLogPath)
+		if err != nil {
+			s.logf("error", "%s job log: %v", scriptName, err)
+		}
+		jobLog = f
+		s.logf("info", "%s → background (%s)", scriptName, jobID)
+	}
 
 	scanner := bufio.NewScanner(pr)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 
 		// Detect client disconnect
 		select {
 		case <-ctx.Done():
-			if !silent {
-				silent = true
-				s.logf("info", "%s → background (%s)", scriptName, jobID)
-			}
+			goSilent()
 		default:
 		}
 
 		if silent {
-			logLines = append(logLines, line)
+			if jobLog != nil {
+				fmt.Fprintln(jobLog, line)
+			}
 			continue
 		}
 
@@ -476,23 +501,34 @@ func (s *Server) streamScript(w http.ResponseWriter, r *http.Request, scriptName
 			_, writeErr = fmt.Fprintf(w, "data: %s\n\n", line)
 		}
 		if writeErr != nil {
-			silent = true
-			logLines = append(logLines, line)
-			s.logf("info", "%s → background (%s)", scriptName, jobID)
+			goSilent()
+			if jobLog != nil {
+				fmt.Fprintln(jobLog, line)
+			}
 			continue
 		}
 		flusher.Flush()
+	}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		// z.B. Zeile > 1MB: Stream abbrechen, aber sauber melden statt
+		// still als "done" zu enden. pr.Close() lässt das Skript per EPIPE sterben.
+		s.logf("error", "%s stream read: %v", scriptName, scanErr)
 	}
 	pr.Close()
 	cmd.Wait()
 
 	exitOK := cmd.ProcessState != nil && cmd.ProcessState.Success()
 	if silent {
-		logFilePath := s.writeJobLog(jobID, logLines)
-		s.recordJob(jobID, scriptName, exitOK, logFilePath)
-		s.logf("info", "%s background %s → %s", scriptName, boolStr(exitOK, "ok", "failed"), logFilePath)
+		if jobLog != nil {
+			jobLog.Close()
+		}
+		s.recordJob(jobID, scriptName, exitOK, jobLogPath)
+		s.logf("info", "%s background %s → %s", scriptName, boolStr(exitOK, "ok", "failed"), jobLogPath)
 	} else {
-		if !exitOK && cmd.ProcessState != nil {
+		if scanErr != nil {
+			fmt.Fprintf(w, "event: stream_error\ndata: read error: %v\n\n", scanErr)
+		} else if !exitOK && cmd.ProcessState != nil {
 			fmt.Fprintf(w, "event: stream_error\ndata: exit %d\n\n", cmd.ProcessState.ExitCode())
 		}
 		fmt.Fprintf(w, "event: done\ndata: \n\n")
@@ -510,13 +546,6 @@ type Job struct {
 	Log          string `json:"log"`
 	TS           string `json:"ts"`
 	Acknowledged bool   `json:"acknowledged"`
-}
-
-func (s *Server) writeJobLog(jobID string, lines []string) string {
-	os.MkdirAll(jobsDir, 0o755)
-	path := filepath.Join(jobsDir, jobID+".log")
-	os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
-	return path
 }
 
 func (s *Server) recordJob(jobID, scriptName string, exitOK bool, logFilePath string) {
@@ -758,9 +787,18 @@ func (s *Server) startCron() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
-			s.logf("info", "cron tick")
 			args := buildCmd(cronScript, "")
-			exec.Command(args[0], args[1:]...).Run()
+			// Timeout = Intervall: ein hängender Runner blockiert sonst
+			// alle folgenden Ticks für immer.
+			ctx, cancel := context.WithTimeout(context.Background(), interval)
+			cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+			cmd.WaitDelay = 5 * time.Second
+			if err := cmd.Run(); ctx.Err() == context.DeadlineExceeded {
+				s.logf("warn", "cron run timed out after %v", interval)
+			} else if err != nil {
+				s.logf("warn", "cron run failed: %v", err)
+			}
+			cancel()
 		}
 	}()
 }
@@ -871,12 +909,17 @@ func checkIdentity() (string, bool) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	identity := strings.TrimSpace(string(body))
-	if strings.HasPrefix(identity, "Error") || strings.HasPrefix(identity, "Unknown") {
-		fmt.Printf("REJECTED\nDylan says: %s\n", identity)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("REJECTED (HTTP %d)\nDylan says: %s\n", resp.StatusCode, identity)
+		return "", false
+	}
+	fields := strings.Fields(identity)
+	if len(fields) == 0 {
+		fmt.Println("FAILED (empty response from Dylan)")
 		return "", false
 	}
 	fmt.Printf("OK - I am %s\n", identity)
-	return strings.Fields(identity)[0], true
+	return fields[0], true
 }
 
 func start(standalone bool) {
@@ -908,6 +951,11 @@ func start(standalone bool) {
 
 	exe, _ := os.Executable()
 	exe, _ = filepath.EvalSymlinks(exe)
+
+	// Einfache Rotation: ab 10MB zur Seite legen (eine Generation genügt)
+	if fi, err := os.Stat(logPath); err == nil && fi.Size() > 10<<20 {
+		os.Rename(logPath, logPath+".old")
+	}
 
 	logF, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -962,22 +1010,26 @@ func start(standalone bool) {
 
 func stop() {
 	pid, ok := isRunning()
-	if ok {
-		fmt.Printf("Stopping Milan (PID %d)...\n", pid)
-		proc, _ := os.FindProcess(pid)
-		proc.Signal(syscall.SIGTERM)
-		for i := 0; i < 5; i++ {
-			time.Sleep(time.Second)
-			if _, ok := isRunning(); !ok {
-				break
-			}
-		}
-		proc.Signal(syscall.SIGKILL)
-		os.Remove(pidFile)
-	} else {
+	if !ok {
 		fmt.Println("Milan not running")
 		os.Remove(pidFile)
+		return
 	}
+	fmt.Printf("Stopping Milan (PID %d)...\n", pid)
+	proc, _ := os.FindProcess(pid)
+	proc.Signal(syscall.SIGTERM)
+	stopped := false
+	for i := 0; i < 5; i++ {
+		time.Sleep(time.Second)
+		if _, ok := isRunning(); !ok {
+			stopped = true
+			break
+		}
+	}
+	if !stopped {
+		proc.Signal(syscall.SIGKILL)
+	}
+	os.Remove(pidFile)
 	fmt.Println("Stopped.")
 }
 

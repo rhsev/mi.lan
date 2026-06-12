@@ -7,10 +7,11 @@
 
 argument = ARGV[0] || 'stranger'
 
-# macOS Notification
+# macOS Notification — inspect escaped Quotes/Backslashes, sonst wäre das
+# URL-Argument AppleScript-Injection (inkl. do shell script)
 system(
   'osascript', '-e',
-  "display notification \"Hello, #{argument}!\" with title \"Milan\""
+  "display notification #{"Hello, #{argument}!".inspect} with title \"Milan\""
 )
 
 # Output is returned as HTTP response
