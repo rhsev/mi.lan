@@ -363,12 +363,23 @@ func (s *Server) executeScript(w http.ResponseWriter, r *http.Request, scriptNam
 		http.Error(w, "Timeout (>5s)", http.StatusUnprocessableEntity)
 	case ok:
 		s.logf("info", "%s completed (%dms)", scriptName, dur.Milliseconds())
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if isHTMLOutput(output) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		} else {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		}
 		fmt.Fprint(w, output)
 	default:
 		s.logf("warn", "%s failed: %s", scriptName, output)
 		http.Error(w, output, http.StatusUnprocessableEntity)
 	}
+}
+
+// Scripts may return full HTML pages (e.g. the markbinder album script);
+// sniff the prefix so browsers render them instead of showing source.
+func isHTMLOutput(out string) bool {
+	t := strings.TrimSpace(out)
+	return strings.HasPrefix(t, "<!DOCTYPE") || strings.HasPrefix(t, "<html")
 }
 
 func runScript(scriptPath, argument string) (output string, ok bool, timedOut bool) {
