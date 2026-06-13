@@ -144,7 +144,8 @@ milan:
 Via URL Scheme:
 
 * `milan://hello/World` runs `scripts/hello.rb` — same as the HTTP call, but without opening Safari
-* `ref://` works the same way, but is intended for document references rather than script execution
+* `milan://stream/hello/World` uses the streaming endpoint — required for long-running scripts or GUI apps
+* `ref://` works the same way as `milan://`, but is intended for document references rather than script execution
 
 The `milan://` and `ref://` URL schemes are handled by [ticker](https://github.com/rhsev/ticker), which registers them as part of its app bundle. No separate URL handler app is needed.
 
