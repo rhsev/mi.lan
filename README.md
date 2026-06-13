@@ -43,6 +43,30 @@ iPhone -> Dylan (Synology) -> Milan (Mac) -> Script -> Response
 * Go 1.21+ (to build)
 * Ruby 3+ (to run `.rb` scripts)
 
+## Directory layout
+
+Milan resolves all paths relative to its own binary:
+
+```
+milan-dir/
+├── milan              # binary
+├── config.yaml        # your config (copy from config.yaml.example)
+├── scripts/           # scripts served as HTTP endpoints
+│   └── custom/        # private scripts (gitignored)
+├── data/              # background job logs (auto-created)
+└── milan.log          # runtime log
+```
+
+Keep the binary and `config.yaml` in the same directory. To call `milan` from
+anywhere, create a symlink — Milan uses `filepath.EvalSymlinks` internally and
+resolves the real binary location correctly:
+
+```bash
+ln -sf /path/to/milan-dir/milan /usr/local/bin/milan
+```
+
+Do not move the binary alone without the config and scripts alongside it.
+
 ## Quick Start
 
 ```bash
