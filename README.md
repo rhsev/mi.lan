@@ -81,6 +81,28 @@ cp config.yaml.example config.yaml
 ./milan start
 ```
 
+## Configuration
+
+`config.yaml` (copy from `config.yaml.example`):
+
+```yaml
+milan:
+  port: 8080
+  allowed_ips:
+    - "192.168.1.*"
+  scripts_dir: "./scripts"
+  notes:
+    - id: my-notes
+      path: /path/to/notes
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `port` | `8080` | HTTP port Milan listens on |
+| `allowed_ips` | — | IPs allowed to trigger scripts. Wildcards supported (`192.168.1.*`). Localhost is always allowed |
+| `scripts_dir` | `./scripts` | Directory for scripts, relative to the binary |
+| `notes` | — | List of note sources (see [Notes / Wiki](#notes--wiki)) |
+
 ## Usage Examples
 
 Via Dylan (Remote):
