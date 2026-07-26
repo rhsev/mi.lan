@@ -373,7 +373,7 @@ func (s *Server) executeScript(w http.ResponseWriter, r *http.Request, scriptNam
 	}
 }
 
-// Scripts may return full HTML pages (e.g. the markbinder album script);
+// Scripts may return full HTML pages (e.g. the fileregister album script);
 // sniff the prefix so browsers render them instead of showing source.
 func isHTMLOutput(out string) bool {
 	t := strings.TrimSpace(out)

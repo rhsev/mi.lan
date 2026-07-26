@@ -1,5 +1,7 @@
 # mi.lan (Milan)
 
+[![test](https://github.com/rhsev/mi.lan/actions/workflows/test.yml/badge.svg)](https://github.com/rhsev/mi.lan/actions/workflows/test.yml)
+
 A lightweight URL bridge for macOS automation.
 
 Milan is a HTTP agent designed to execute local scripts and Apple Shortcuts via simple URL calls. It acts as a persistent bridge, allowing you to trigger local automation from any HTTP-capable source (browser, curl, Stream Deck, or other scripts).
@@ -252,3 +254,7 @@ http://mi.lan/book/shortcut/Note  ->  MacBook: GET /shortcut/Note
 ## License
 
 MIT
+
+---
+
+*Part of a family of plain-text tools — the [profile page](https://github.com/rhsev) has the map.*
