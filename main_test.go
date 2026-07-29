@@ -184,3 +184,65 @@ func TestIsHTMLOutput(t *testing.T) {
 		}
 	}
 }
+
+// findScript's precedence is what lets a ported script replace its original
+// without the endpoint changing, so pin it — including the guards that the
+// empty extension makes necessary.
+func TestFindScriptPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	custom := filepath.Join(dir, "custom")
+	if err := os.MkdirAll(custom, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, mode os.FileMode) {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(filepath.Join(custom, "both.rb"), 0o644)
+	write(filepath.Join(custom, "both"), 0o755)      // compiled: must win
+	write(filepath.Join(custom, "onlyrb.rb"), 0o644) // no binary: script
+	write(filepath.Join(custom, "plain"), 0o644)     // not executable: ignored
+	if err := os.MkdirAll(filepath.Join(custom, "adir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Server{config: &Config{Milan: MilanConfig{ScriptsDir: dir}}}
+
+	cases := []struct{ name, want string }{
+		{"both", filepath.Join(custom, "both")},
+		{"onlyrb", filepath.Join(custom, "onlyrb.rb")},
+		{"plain", ""}, // a regular file without the executable bit is not a script
+		{"adir", ""},  // a directory must never resolve
+		{"nope", ""},
+	}
+	for _, c := range cases {
+		if got := s.findScript(c.name); got != c.want {
+			t.Errorf("findScript(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	// buildCmd runs a binary directly, a script through its interpreter
+	if got := buildCmd(filepath.Join(custom, "both"), "")[0]; got != filepath.Join(custom, "both") {
+		t.Errorf("buildCmd(binary)[0] = %q, want the binary itself", got)
+	}
+	if got := buildCmd(filepath.Join(custom, "onlyrb.rb"), "")[0]; got != rubyBin {
+		t.Errorf("buildCmd(.rb)[0] = %q, want %q", got, rubyBin)
+	}
+
+	list := s.listScripts()
+	joined := strings.Join(list, ",")
+	for _, want := range []string{"both", "onlyrb"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("listScripts() = %v, missing %q", list, want)
+		}
+	}
+	for _, unwanted := range []string{"plain", "adir"} {
+		for _, got := range list {
+			if got == unwanted {
+				t.Errorf("listScripts() = %v, should not contain %q", list, unwanted)
+			}
+		}
+	}
+}

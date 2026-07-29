@@ -42,9 +42,23 @@ import (
 const version = "2.0.1"
 
 var (
-	scriptExtensions = []string{".rb", ".sh", ".py"}
+	// Tried in order, so a compiled binary (no extension) wins over a
+	// same-named script: that is how a slow script gets replaced by a ported
+	// one without the endpoint URL changing. See cmd/livesync.
+	scriptExtensions = []string{"", ".rb", ".sh", ".py"}
 	scriptSubdirs    = []string{"custom", ""}
 )
+
+// isScriptFile reports whether path can be run for the given extension. The
+// empty extension means "a compiled binary", so it has to be a regular
+// executable file — without that check a directory would match.
+func isScriptFile(path, ext string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	return ext != "" || fi.Mode().Perm()&0o111 != 0
+}
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -294,7 +308,7 @@ func (s *Server) findScript(name string) string {
 			} else {
 				path = filepath.Join(dir, sub, name+ext)
 			}
-			if _, err := os.Stat(path); err == nil {
+			if isScriptFile(path, ext) {
 				return path
 			}
 		}
@@ -319,6 +333,15 @@ func (s *Server) listScripts() []string {
 			}
 			name := e.Name()
 			for _, ext := range scriptExtensions {
+				if ext == "" {
+					// HasSuffix(name, "") is always true, so match explicitly:
+					// no extension, and executable
+					if filepath.Ext(name) == "" && isScriptFile(filepath.Join(d, name), "") {
+						seen[name] = true
+						break
+					}
+					continue
+				}
 				if strings.HasSuffix(name, ext) {
 					seen[strings.TrimSuffix(name, ext)] = true
 					break
@@ -773,7 +796,7 @@ func (s *Server) startCron() {
 	var cronScript string
 	for _, ext := range scriptExtensions {
 		path := filepath.Join(s.config.Milan.ScriptsDir, "cron-runner"+ext)
-		if _, err := os.Stat(path); err == nil {
+		if isScriptFile(path, ext) {
 			cronScript = path
 			break
 		}
