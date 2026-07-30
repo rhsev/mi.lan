@@ -945,11 +945,20 @@ func checkIdentity() (string, bool) {
 	return fields[0], true
 }
 
+// start launches the daemon. It exits non-zero on every failure — anything
+// driving milan (twin's Cmd hook, launchd, a script) has no other way to tell
+// that it did not come up. Every path here used to `return` silently, so a
+// failed start looked exactly like a good one: on 2026-07-30 Little Snitch
+// blocked a freshly synced binary, the identity check timed out, milan stayed
+// down, and the deploying tool reported success.
+//
+// "Already running" stays exit 0 on purpose: `start` is meant to be safe to
+// call twice, and the post-condition (a running milan) holds.
 func start(standalone bool) {
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Println("Error:", err)
-		return
+		os.Exit(1)
 	}
 	port := cfg.Milan.Port
 
@@ -959,7 +968,7 @@ func start(standalone bool) {
 	}
 	if portInUse(port) {
 		fmt.Printf("Port %d in use — cannot start\n", port)
-		return
+		os.Exit(1)
 	}
 
 	var identity string
@@ -968,7 +977,7 @@ func start(standalone bool) {
 	} else {
 		var ok bool
 		if identity, ok = checkIdentity(); !ok {
-			return
+			os.Exit(1)
 		}
 	}
 
@@ -983,7 +992,7 @@ func start(standalone bool) {
 	logF, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		fmt.Println("Cannot open log file:", err)
-		return
+		os.Exit(1)
 	}
 	defer logF.Close()
 
@@ -996,7 +1005,7 @@ func start(standalone bool) {
 
 	if err := cmd.Start(); err != nil {
 		fmt.Println("Failed to start:", err)
-		return
+		os.Exit(1)
 	}
 
 	pid := cmd.Process.Pid
@@ -1011,7 +1020,7 @@ func start(standalone bool) {
 			if err := proc.Signal(syscall.Signal(0)); err != nil {
 				fmt.Printf("Failed to start Milan — process exited early, check %s\n", logPath)
 				os.Remove(pidFile)
-				return
+				os.Exit(1)
 			}
 		}
 		if resp, err := client.Get(healthURL); err == nil {
@@ -1028,6 +1037,7 @@ func start(standalone bool) {
 	} else {
 		fmt.Printf("Failed to start Milan — check %s\n", logPath)
 		os.Remove(pidFile)
+		os.Exit(1)
 	}
 }
 
