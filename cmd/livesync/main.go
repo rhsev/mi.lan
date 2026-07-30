@@ -4,9 +4,11 @@
 // Why compiled: the check runs every 5 minutes, and 106 of the Ruby version's
 // 185 ms were the interpreter starting up before a single line of the script
 // ran. That is the one cost a compiled binary removes outright (measured
-// 2026-07-30). Everything else about the check is unchanged, deliberately: the
-// Ruby version stays next to it as the reference, and both must print the same
-// diagnosis for the same machine state.
+// 2026-07-30). The behaviour is otherwise unchanged from the Ruby original,
+// which was diffed against this on twelve synthetic machine states before the
+// switch. That original (`scripts/custom/livesync.rb`) is a **relic** now, not
+// a reference: it is gitignored, so nothing can gate on it. The rules live in
+// `decide` and are pinned by main_test.go.
 //
 // The check is process-based rather than `launchctl list`, because the daemon
 // runs as a system LaunchDaemon (/Library/LaunchDaemons, UserName=extern) and
@@ -75,58 +77,11 @@ func main() {
 
 	log, tail := readTail()
 
-	// A marker only counts when it appears *after* the last "LiveSync active" —
-	// otherwise the daemon recovered (a cold-start race, or a restart just now).
-	crashIdx := lastIndexFunc(tail, crashRe.MatchString)
-	lockIdx := lastIndexFunc(tail, lockRe.MatchString)
-	activeIdx := lastIndexFunc(tail, func(l string) bool { return strings.Contains(l, "LiveSync active") })
-
-	locked := lockIdx >= 0 && (activeIdx < 0 || lockIdx > activeIdx)
-	// A crash only counts when there is no lock: the lock's "cannot continue" is
-	// not a real crash.
-	crash := ""
-	if !locked && crashIdx >= 0 && (activeIdx < 0 || crashIdx > activeIdx) {
-		crash = tail[crashIdx]
-	}
-	leak := lastIndexFunc(tail, func(l string) bool {
-		return strings.Contains(l, "MaxListenersExceededWarning")
-	}) >= 0
-	active := activeIdx >= 0
-
-	var issues []issue
-	if locked {
-		issues = append(issues, issue{"lock", "Remote-DB gesperrt (LOCK) — Unlock nötig (z. B. nach iPhone-Rebuild/Doctor). Headless löst das NICHT selbst, Neustart hilft NICHT → server-seitig `_local/obsydian_livesync_milestone` locked:false."})
-	}
-	if crash != "" {
-		issues = append(issues, issue{"red", fmt.Sprintf("Crash im Log: `%s`", crash)})
-	}
-	if haveUptime && uptime > uptimeWarnH*time.Hour {
-		issues = append(issues, issue{"orange", fmt.Sprintf("Uptime %s (>%dh) — Watcher-Degradation möglich; Auto-Neustart prüfen", upStr, uptimeWarnH)})
-	}
-
-	// The leak no longer colours the status (2026-07-30). Over the whole log:
-	// 46 daemon instances, 8 of them warned, and every one of those warned
-	// *exactly twice* — never once, never three times. Node emits
-	// MaxListenersExceededWarning once per EventTarget when the 11th listener
-	// is added and never again, so this is a startup artefact, not a trend. It
-	// cannot escalate, and dylan's monitor.sh never acted on it anyway (it
-	// restarts on 🔴 or uptime>=24h) — it just pinned /monitor at 🟠 for the
-	// instance's whole life. Kept as a detail line.
-	var infos []string
-	if leak {
-		infos = append(infos, "`MaxListenersExceededWarning` beim Start dieser Instanz — Startartefakt (feuert 2× oder nie), kein Verlaufssignal; gegen echte Watcher-Degradation greift der 24h-Neustart")
-	}
+	v := decide(tail, uptime, haveUptime, upStr)
+	issues, infos, active := v.issues, v.infos, v.active
 
 	emoji := map[string]string{"lock": "🔒", "red": "🔴", "orange": "🟠"}
-	status := "🟢"
-	switch {
-	case hasSev(issues, "lock"):
-		status = "🔒"
-	case hasSev(issues, "red"):
-		status = "🔴"
-	case len(issues) > 0:
-		status = "🟠"
-	}
+	status := v.status
 
 	if status == "🟢" {
 		activeMark := "—"
@@ -154,6 +109,74 @@ func main() {
 
 type issue struct{ sev, msg string }
 
+// verdict is everything the output depends on, once the log has been read.
+type verdict struct {
+	status string
+	issues []issue
+	infos  []string
+	active bool
+}
+
+// decide turns the tail of the daemon log plus its uptime into the verdict.
+// Pure on purpose: no process table, no filesystem, no clock — so every branch
+// is reachable from a table test (cmd/livesync/main_test.go), which is where
+// the rules below were pinned after they were hand-tuned on 2026-07-30.
+//
+// The rules, in the order they matter:
+//   - a crash or lock marker only counts when it appears *after* the last
+//     "LiveSync active"; before it the daemon recovered (cold-start race, or a
+//     restart that just happened)
+//   - a lock outranks a crash, because the lock's own "cannot continue" is not
+//     a real crash
+//   - the listener warning never colours the status (see the note below)
+func decide(tail []string, uptime time.Duration, haveUptime bool, upStr string) verdict {
+	crashIdx := lastIndexFunc(tail, crashRe.MatchString)
+	lockIdx := lastIndexFunc(tail, lockRe.MatchString)
+	activeIdx := lastIndexFunc(tail, func(l string) bool { return strings.Contains(l, "LiveSync active") })
+
+	locked := lockIdx >= 0 && (activeIdx < 0 || lockIdx > activeIdx)
+	crash := ""
+	if !locked && crashIdx >= 0 && (activeIdx < 0 || crashIdx > activeIdx) {
+		crash = tail[crashIdx]
+	}
+	leak := lastIndexFunc(tail, func(l string) bool {
+		return strings.Contains(l, "MaxListenersExceededWarning")
+	}) >= 0
+
+	v := verdict{status: "🟢", active: activeIdx >= 0}
+	if locked {
+		v.issues = append(v.issues, issue{"lock", "Remote-DB gesperrt (LOCK) — Unlock nötig (z. B. nach iPhone-Rebuild/Doctor). Headless löst das NICHT selbst, Neustart hilft NICHT → server-seitig `_local/obsydian_livesync_milestone` locked:false."})
+	}
+	if crash != "" {
+		v.issues = append(v.issues, issue{"red", fmt.Sprintf("Crash im Log: `%s`", crash)})
+	}
+	if haveUptime && uptime > uptimeWarnH*time.Hour {
+		v.issues = append(v.issues, issue{"orange", fmt.Sprintf("Uptime %s (>%dh) — Watcher-Degradation möglich; Auto-Neustart prüfen", upStr, uptimeWarnH)})
+	}
+
+	// The leak does not colour the status (2026-07-30). Over the whole log: 46
+	// daemon instances, 8 of them warned, and every one of those warned
+	// *exactly twice* — never once, never three times. Node emits
+	// MaxListenersExceededWarning once per EventTarget when the 11th listener is
+	// added and never again, so this is a startup artefact, not a trend. It
+	// cannot escalate, and dylan's monitor.sh never acted on it anyway (it
+	// restarts on 🔴 or uptime>=24h) — it just pinned /monitor at 🟠 for the
+	// instance's whole life. Kept as a detail line.
+	if leak {
+		v.infos = append(v.infos, "`MaxListenersExceededWarning` beim Start dieser Instanz — Startartefakt (feuert 2× oder nie), kein Verlaufssignal; gegen echte Watcher-Degradation greift der 24h-Neustart")
+	}
+
+	switch {
+	case hasSev(v.issues, "lock"):
+		v.status = "🔒"
+	case hasSev(v.issues, "red"):
+		v.status = "🔴"
+	case len(v.issues) > 0:
+		v.status = "🟠"
+	}
+	return v
+}
+
 func hasSev(issues []issue, sev string) bool {
 	for _, is := range issues {
 		if is.sev == sev {
@@ -175,7 +198,13 @@ func findDaemon() (pid string, start time.Time, found bool) {
 	if err != nil {
 		return "", time.Time{}, false
 	}
-	sc := bufio.NewScanner(strings.NewReader(string(out)))
+	return pickDaemon(string(out))
+}
+
+// pickDaemon selects the daemon from `ps -Ao pid=,lstart=,args=` output. Split
+// out from findDaemon so the decoy cases are testable without a process table.
+func pickDaemon(psOutput string) (pid string, start time.Time, found bool) {
+	sc := bufio.NewScanner(strings.NewReader(psOutput))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // command lines can be long
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -204,7 +233,13 @@ func findDaemon() (pid string, start time.Time, found bool) {
 // whole thing (14.4 MB on 2026-07-30) and split it into a full line array to
 // keep 80 lines — about 54 ms, growing with the log. Fixed there too.
 func readTail() (string, []string) {
-	for _, path := range errLogs() {
+	return readTailFrom(errLogs())
+}
+
+// readTailFrom is readTail with the candidate paths injected, so the truncation
+// behaviour can be tested on a temp file.
+func readTailFrom(paths []string) (string, []string) {
+	for _, path := range paths {
 		f, err := os.Open(path)
 		if err != nil {
 			continue
