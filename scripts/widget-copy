@@ -1,0 +1,46 @@
+#!/bin/sh
+# widget-copy — copy a file and let the board show how far it got.
+#
+#   widget-copy large-archive.zip /Volumes/Backup/
+#
+# The trick is `pv -n`: it writes nothing but the percentage to stderr, one
+# number per line, which is exactly what a progress tile wants. Needs pv
+# (`brew install pv`).
+#
+# The tile carries a short ttl while the copy runs: if this script dies, the
+# board greys the tile out on its own a few seconds later instead of showing a
+# percentage that stopped being true.
+
+set -eu
+
+[ $# -eq 2 ] || {
+	echo "usage: widget-copy SRC DST" >&2
+	exit 2
+}
+
+src="$1"
+dst="$2"
+[ -f "$src" ] || {
+	echo "widget-copy: no such file: $src" >&2
+	exit 1
+}
+command -v pv >/dev/null 2>&1 || {
+	echo "widget-copy: needs pv — brew install pv" >&2
+	exit 1
+}
+[ -d "$dst" ] && dst="${dst%/}/$(basename "$src")"
+
+widget="$(dirname "$0")/widget"
+name="$(basename "$src")"
+target="${WIDGET_TARGET:-copy}"
+
+push() { "$widget" "$target" --icon "$2" --ttl "$3" --progress "${4:-0}" --text "$1" >/dev/null; }
+
+trap 'push "abgebrochen: $name" warn 60 >/dev/null 2>&1 || true; exit 130' INT TERM
+
+# stderr (the percentages) goes into the pipe, stdout (the bytes) into the file.
+pv -n "$src" 2>&1 >"$dst" | while IFS= read -r pct; do
+	push "$name → $(dirname "$dst")" download 15 "$pct"
+done
+
+push "$name kopiert" check 300 100
