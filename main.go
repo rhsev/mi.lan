@@ -259,6 +259,10 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, ip string) {
 		jobID, _ := url.PathUnescape(strings.TrimPrefix(p, "/jobs/ack/"))
 		s.acknowledgeJob(jobID)
 		fmt.Fprintf(w, "acknowledged: %s", jobID)
+	case p == "/widgets":
+		s.handleWidgetList(w)
+	case strings.HasPrefix(p, "/widget/"):
+		s.handleWidget(w, r, strings.TrimPrefix(p, "/widget/"))
 	case p == "/notes":
 		writeJSON(w, s.listNoteSources())
 	case strings.HasPrefix(p, "/notes/"):

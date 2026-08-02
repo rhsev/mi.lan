@@ -143,6 +143,42 @@ GET /jobs/ack/<id>  → mark job as acknowledged
 
 Jobs are identified by `<script>_<timestamp>` and include script name, exit status, log path, timestamp, and acknowledged flag. History is capped at 100 entries.
 
+## Widget Inbox
+
+A place for scripts to leave their state. One target is one state, not a log:
+a push overwrites the previous one, so a copy job can rewrite itself once a
+second without piling up 400 progress lines. Dylan's board reads all targets
+at once and draws them as tiles.
+
+```
+POST   /widget/<target>        → push (JSON body, or text/plain + query params)
+GET    /widgets                → every target as one JSON array
+DELETE /widget/<target>        → remove the tile
+GET    /widget/<target>/clear  → same, for callers that cannot send DELETE
+```
+
+Targets must match `^[a-z0-9_-]{1,32}$` — they are path segments on disk
+(`data/widgets/<target>.json`, written atomically). Fields, all optional
+except the target: `title`, `text`, `progress` (0–100), `icon`, `color`,
+`urgent`, `ttl`, `sort`. The server adds `updated_at`.
+
+`ttl` (seconds) marks how long the state stays valid — the board greys the
+tile out afterwards instead of deleting it. Without `ttl` the tile stands
+until something replaces it. `text` may contain ANSI; Milan stores it raw and
+lets the display side decide. With `urgent: true` the text additionally goes
+through [ticker](https://github.com/rhsev/ticker) once, on arrival.
+
+`scripts/widget` is the client — a thin curl wrapper, no second binary:
+
+```bash
+widget copy --text "Backup läuft" --progress 42 --icon download --ttl 120
+na | widget na --color '#A3BE8C'      # stdin becomes the text
+widget copy --clear
+```
+
+It talks to `http://127.0.0.1:8080` unless `MILAN_URL` says otherwise;
+localhost is always allowed, so local scripts push without any configuration.
+
 ## Notes / Wiki
 
 Milan can serve Markdown and HTML files from configured directories:

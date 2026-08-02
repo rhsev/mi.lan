@@ -1,0 +1,100 @@
+#!/bin/sh
+# widget — push one state tile into Milan's widget inbox.
+#
+# A target is a state, not a log: every push overwrites the previous one.
+# A thin curl wrapper on purpose — no second binary to keep in sync.
+
+set -eu
+
+usage() {
+	cat <<'USAGE'
+Usage: widget TARGET [options]
+       widget TARGET --clear
+
+  --text TEXT     tile body; "-" reads stdin (may contain ANSI)
+  --title TEXT    heading above the text
+  --progress N    0–100, drawn as a bar
+  --icon NAME     download, check, warn … (Dylan's own short names)
+  --color HEX     dot colour, e.g. "#34c759"
+  --ttl N         seconds until the tile counts as stale and greys out
+  --sort N        display order, lowest first
+  --urgent        additionally send the text through ticker, once
+  --clear         remove the tile and exit
+
+Environment:
+  MILAN_URL       default http://127.0.0.1:8080
+
+Examples:
+  widget copy --text "Backup läuft" --progress 42 --icon download
+  na | widget na --ttl 300
+USAGE
+	exit "${1:-0}"
+}
+
+[ $# -gt 0 ] || usage 1
+case "$1" in
+-h | --help) usage 0 ;;
+esac
+
+target="$1"
+shift
+
+url="${MILAN_URL:-http://127.0.0.1:8080}"
+text=''
+have_text=0
+query=''
+
+# Percent-encoding in awk, byte-wise under LC_ALL=C so UTF-8 titles survive.
+urlencode() {
+	LC_ALL=C awk -v s="$1" 'BEGIN {
+		for (i = 0; i < 256; i++) ord[sprintf("%c", i)] = i
+		for (i = 1; i <= length(s); i++) {
+			c = substr(s, i, 1)
+			if (c ~ /[A-Za-z0-9._~-]/) printf "%s", c
+			else printf "%%%02X", ord[c]
+		}
+	}'
+}
+
+add() {
+	[ -n "${2:-}" ] || return 0
+	query="$query&$1=$(urlencode "$2")"
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--text)
+		if [ "${2:-}" = "-" ]; then text=$(cat); else text="${2:-}"; fi
+		have_text=1
+		shift 2
+		;;
+	--title | --icon | --color | --progress | --ttl | --sort)
+		add "${1#--}" "${2:-}"
+		shift 2
+		;;
+	--urgent)
+		query="$query&urgent=1"
+		shift
+		;;
+	--clear)
+		exec curl -sS -X DELETE "$url/widget/$target"
+		;;
+	-h | --help) usage 0 ;;
+	*)
+		echo "widget: unknown option $1" >&2
+		exit 2
+		;;
+	esac
+done
+
+# No --text and stdin is a pipe: take the pipe, so `na | widget na` works
+# without spelling out "--text -".
+if [ "$have_text" -eq 0 ] && [ ! -t 0 ]; then
+	text=$(cat)
+fi
+
+# The body carries the text (ANSI and newlines survive), the query the rest.
+printf '%s' "$text" |
+	curl -sS -X POST --data-binary @- \
+		-H 'Content-Type: text/plain; charset=utf-8' \
+		"$url/widget/$target?${query#&}"
