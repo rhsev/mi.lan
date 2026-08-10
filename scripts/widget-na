@@ -1,0 +1,60 @@
+#!/bin/sh
+# widget-na — push the next few tasks onto the board.
+#
+#   widget-na            # top 4
+#   widget-na 6          # top 6
+#
+# NA_FILTER passes extra flags to na_json, e.g. NA_FILTER="--tag today" —
+# plain `next` is the whole index, which is a list, not next steps.
+#
+# No ttl on purpose: next steps are a slow state, not a job that should be
+# running. The tile shows the clock time of the last push, which is the honest
+# answer — it never greys out, because nothing has failed to happen.
+#
+# Needs na_json on PATH (or NA_JSON pointing at it).
+
+set -eu
+
+count="${1:-4}"
+case "$count" in
+'' | *[!0-9]*)
+	echo "usage: widget-na [COUNT]" >&2
+	exit 2
+	;;
+esac
+
+na_json="${NA_JSON:-na_json}"
+command -v "$na_json" >/dev/null 2>&1 || {
+	echo "widget-na: na_json not found — set NA_JSON to its path" >&2
+	exit 1
+}
+
+widget="$(dirname "$0")/widget"
+target="${WIDGET_TARGET:-na}"
+
+# The project is context, not the task: bright black so the eye lands on the
+# task text first. Anything past COUNT becomes one summary line rather than a
+# longer tile — the board clips at about five lines anyway.
+text=$("$na_json" next ${NA_FILTER:-} --json | /usr/bin/awk -v n="$count" '
+	/"task":/    { task    = value(); next }
+	/"project":/ { project = value()
+	               total++
+	               if (total > n) next
+	               dim = "\033[90m"
+	               out = out sprintf("• %s %s(%s)\033[0m\n", task, dim, project)
+	             }
+	END {
+		if (total == 0) { printf "keine offenen Aufgaben"; exit }
+		printf "%s", out
+		if (total > n) printf "\033[90m… %d weitere\033[0m", total - n
+	}
+	function value(   s) {
+		s = $0
+		sub(/^[^:]*:[[:space:]]*"/, "", s)
+		sub(/",?[[:space:]]*$/, "", s)
+		gsub(/\\"/, "\"", s)
+		return s
+	}
+')
+
+printf '%s' "$text" | "$widget" "$target" >/dev/null
