@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """board — the widget inbox as plain text, for a phone home screen.
 
-    http://<mini>:8080/board
+    http://<mini>:8080/board          all tiles
+    http://<mini>:8080/board/copy     one of them
 
 Milan serves a script's stdout as text/plain, so this is one URL and no
 parsing on the other end — enough for an "Any Text" widget or a Shortcut.
+It also passes whatever follows the script name as an argument, which is
+where the target filter comes from: one widget per tile, if you want that.
 
 The board in the browser has colour and a greyed-out state to lean on; a
 text widget has neither, so staleness has to be spelled out in words.
@@ -35,8 +38,12 @@ except Exception as err:                       # noqa: BLE001 — any failure re
     print(f"Board nicht erreichbar: {err}")
     sys.exit(0)                                # a widget shows text, not a stack trace
 
+wanted = sys.argv[1].strip() if len(sys.argv) > 1 and sys.argv[1].strip() else None
+if wanted:
+    widgets = [w for w in widgets if w.get("target") == wanted]
+
 if not widgets:
-    print("Keine Kacheln.")
+    print(f"Keine Kachel '{wanted}'." if wanted else "Keine Kacheln.")
     sys.exit(0)
 
 now = time.time()
