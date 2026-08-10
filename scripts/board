@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""board — the widget inbox as plain text, for a phone home screen.
+
+    http://<mini>:8080/board
+
+Milan serves a script's stdout as text/plain, so this is one URL and no
+parsing on the other end — enough for an "Any Text" widget or a Shortcut.
+
+The board in the browser has colour and a greyed-out state to lean on; a
+text widget has neither, so staleness has to be spelled out in words.
+"""
+
+import json
+import re
+import sys
+import time
+import urllib.request
+
+URL = "http://127.0.0.1:8080/widgets"
+ANSI = re.compile(r"\033\[[0-9;]*m")
+LIMIT = 3  # lines kept per tile — a home screen widget is not a terminal
+
+
+def since(seconds):
+    """Coarse age. "0 h" reads like a bug, so drop to the unit that has digits."""
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} h"
+    return f"{int(seconds // 86400)} Tagen"
+
+try:
+    with urllib.request.urlopen(URL, timeout=5) as response:
+        widgets = json.load(response)
+except Exception as err:                       # noqa: BLE001 — any failure reads the same
+    print(f"Board nicht erreichbar: {err}")
+    sys.exit(0)                                # a widget shows text, not a stack trace
+
+if not widgets:
+    print("Keine Kacheln.")
+    sys.exit(0)
+
+now = time.time()
+out = []
+
+for widget in widgets:
+    name = widget.get("title") or widget.get("target", "?")
+    stamp = widget.get("updated_at", 0)
+    ttl = widget.get("ttl")
+
+    # Without a ttl a tile is a slow state and never goes stale; with one,
+    # an expired tile means something that should have run did not.
+    if ttl and stamp and (now - stamp) > ttl:
+        head = f"{name} — seit {since(now - stamp)} still"
+    else:
+        head = name
+        if stamp:
+            head += time.strftime(" (%H:%M)", time.localtime(stamp))
+
+    out.append(head)
+
+    text = ANSI.sub("", widget.get("text", "")).strip()
+    for line in text.splitlines()[:LIMIT]:
+        out.append(f"  {line}")
+
+    progress = widget.get("progress")
+    if progress is not None:
+        out.append(f"  {progress}%")
+
+print("\n".join(out))

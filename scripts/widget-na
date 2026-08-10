@@ -57,4 +57,6 @@ text=$("$na_json" next ${NA_FILTER:-} --json | /usr/bin/awk -v n="$count" '
 	}
 ')
 
-printf '%s' "$text" | "$widget" "$target" >/dev/null
+# The title is for readers without the YAML — the phone's text widget, say.
+# On the board Dylan's own label wins, so nothing collides.
+printf '%s' "$text" | "$widget" "$target" --title "Nächste Schritte" >/dev/null
