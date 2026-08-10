@@ -61,7 +61,9 @@ for widget in widgets:
     else:
         head = name
         if stamp:
-            head += time.strftime(" (%H:%M)", time.localtime(stamp))
+            # Date as well as time: on a phone this is often read hours later,
+            # and "14:21" alone cannot say whether that was today.
+            head += time.strftime(" (%m-%d, %H:%M)", time.localtime(stamp))
 
     # One line per tile. A single-line text *is* the status ("OK · …") and
     # comes along; a multi-line one is a list, and on a home screen its
