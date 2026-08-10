@@ -18,7 +18,6 @@ import urllib.request
 
 URL = "http://127.0.0.1:8080/widgets"
 ANSI = re.compile(r"\033\[[0-9;]*m")
-LIMIT = 3  # lines kept per tile — a home screen widget is not a terminal
 
 
 def since(seconds):
@@ -57,14 +56,20 @@ for widget in widgets:
         if stamp:
             head += time.strftime(" (%H:%M)", time.localtime(stamp))
 
-    out.append(head)
-
+    # One line per tile. A single-line text *is* the status ("OK · …") and
+    # comes along; a multi-line one is a list, and on a home screen its
+    # length says more than its first three entries would.
     text = ANSI.sub("", widget.get("text", "")).strip()
-    for line in text.splitlines()[:LIMIT]:
-        out.append(f"  {line}")
+    lines = text.splitlines()
+    if len(lines) == 1:
+        head += f": {lines[0]}"
+    elif len(lines) > 1:
+        head += f": {len(lines)} Einträge"
 
     progress = widget.get("progress")
     if progress is not None:
-        out.append(f"  {progress}%")
+        head += f" · {progress}%"
+
+    out.append(head)
 
 print("\n".join(out))
