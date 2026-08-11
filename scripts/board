@@ -56,24 +56,28 @@ for widget in widgets:
 
     # Without a ttl a tile is a slow state and never goes stale; with one,
     # an expired tile means something that should have run did not.
+    # Immer "Name: …" — der Doppelpunkt sitzt am Namen, damit die Zeile in
+    # beiden Fällen gleich anfängt und die Zeit für sich steht.
     if ttl and stamp and (now - stamp) > ttl:
-        head = f"{name} — seit {since(now - stamp)} still"
+        head = f"{name}: seit {since(now - stamp)} still"
+        sep = " — "
     else:
-        head = name
+        # Datum und Uhrzeit, weil das auf einem Handy oft Stunden später
+        # gelesen wird und "11:45" allein nicht sagt, ob das heute war.
+        head = f"{name}:"
         if stamp:
-            # Date as well as time: on a phone this is often read hours later,
-            # and "14:21" alone cannot say whether that was today.
             head += time.strftime(" (%m-%d, %H:%M)", time.localtime(stamp))
+        sep = " "
 
-    # One line per tile. A single-line text *is* the status ("OK · …") and
-    # comes along; a multi-line one is a list, and on a home screen its
-    # length says more than its first three entries would.
+    # One line per tile. A single-line text *is* the status ("OK") and comes
+    # along; a multi-line one is a list, and on a home screen its length says
+    # more than its first three entries would.
     text = ANSI.sub("", widget.get("text", "")).strip()
     lines = text.splitlines()
     if len(lines) == 1:
-        head += f": {lines[0]}"
+        head += sep + lines[0]
     elif len(lines) > 1:
-        head += f": {len(lines)} Einträge"
+        head += sep + f"{len(lines)} Einträge"
 
     progress = widget.get("progress")
     if progress is not None:
