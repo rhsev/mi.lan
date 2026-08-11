@@ -22,6 +22,12 @@ import urllib.request
 URL = "http://127.0.0.1:8080/widgets"
 ANSI = re.compile(r"\033\[[0-9;]*m")
 
+# Ein Zeichen vorweg, damit der Zustand vor dem Lesen erkennbar ist. Bewusst
+# aus dem Vorrat von Apple Symbols (der Schrift im Handy-Widget): ✓ und ✗
+# fehlen dort, ☑ und ☒ nicht, Emoji ohnehin nicht.
+GLYPHS = {"check": "☑", "warn": "⚠", "download": "▶", "": "·"}
+STALE = "⌛"
+
 
 def since(seconds):
     """Coarse age. "0 h" reads like a bug, so drop to the unit that has digits."""
@@ -59,12 +65,13 @@ for widget in widgets:
     # Immer "Name: …" — der Doppelpunkt sitzt am Namen, damit die Zeile in
     # beiden Fällen gleich anfängt und die Zeit für sich steht.
     if ttl and stamp and (now - stamp) > ttl:
-        head = f"{name}: seit {since(now - stamp)} still"
+        head = f"{STALE} {name}: seit {since(now - stamp)} still"
         sep = " — "
     else:
+        glyph = GLYPHS.get(widget.get("icon", ""), GLYPHS[""])
         # Datum und Uhrzeit, weil das auf einem Handy oft Stunden später
         # gelesen wird und "11:45" allein nicht sagt, ob das heute war.
-        head = f"{name}:"
+        head = f"{glyph} {name}:"
         if stamp:
             head += time.strftime(" (%m-%d, %H:%M)", time.localtime(stamp))
         sep = " "
