@@ -870,10 +870,17 @@ func serve() {
 
 	srv.startCron()
 
+	// Claim the pidfile here, not only in start(). Under launchd, `serve` is
+	// what runs — nothing calls start() — and without this `milan status` would
+	// report "not running" while milan is happily serving. A misleading status
+	// is worse than none.
+	os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o644)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-stop
+		os.Remove(pidFile)
 		fmt.Println("\nMilan stopped.")
 		os.Exit(0)
 	}()

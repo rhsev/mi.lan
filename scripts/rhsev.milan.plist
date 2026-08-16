@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for milan on the Mac mini.
+
+  A LaunchAgent, not a LaunchDaemon: milan runs scripts that open apps, drive
+  Apple Shortcuts and post notifications, all of which need a GUI session. A
+  daemon has none. It lives in /Library/LaunchAgents rather than
+  ~/Library/LaunchAgents because this machine's home is on an external volume
+  that mounts `noowners`, which makes launchd refuse home agents with
+  `Bootstrap failed: 5: EIO`. A global agent runs as the console user, and here
+  that is `extern` — the account milan needs.
+
+  Why it exists at all: milan used to be started by hand. A milan started that
+  way at boot ended up in a context where its child processes could not resolve
+  their own uid, so every `sudo -n` inside a script failed with "you do not
+  exist in the passwd database". On 2026-08-01 that had been silently breaking
+  the livesync restart for 20 hours — 622 requests, none of which did anything.
+
+  Runs `serve` (the foreground server), not `start` (which daemonises and would
+  exit immediately, so launchd would restart it forever). `serve` writes the
+  pidfile itself, so `milan status` stays truthful.
+
+  Install:
+    sudo cp scripts/rhsev.milan.plist /Library/LaunchAgents/rhsev.milan.plist
+    sudo chown root:wheel /Library/LaunchAgents/rhsev.milan.plist
+    sudo chmod 644 /Library/LaunchAgents/rhsev.milan.plist
+    launchctl bootstrap gui/$(id -u) /Library/LaunchAgents/rhsev.milan.plist
+
+  Restart (this is now the way — not `milan restart`):
+    launchctl kickstart -k gui/$(id -u)/rhsev.milan
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>rhsev.milan</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Volumes/lightning/Git/rhsev/mi.lan/milan</string>
+		<string>serve</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/Volumes/lightning/Git/rhsev/mi.lan</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- launchd gives an agent a bare PATH; scripts reach for Homebrew tools. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>/Volumes/lightning/Git/rhsev/mi.lan/milan.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Volumes/lightning/Git/rhsev/mi.lan/milan.log</string>
+</dict>
+</plist>
