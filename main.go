@@ -39,7 +39,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const version = "2.0.1"
+const version = "2.1.0"
 
 // identityAttempts is how often the dylan handshake is tried before giving up;
 // see checkIdentity for why the first attempt regularly needs a second chance.
