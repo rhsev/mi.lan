@@ -100,11 +100,21 @@ func main() {
 	if crash != "" {
 		issues = append(issues, issue{"red", fmt.Sprintf("Crash im Log: `%s`", crash)})
 	}
-	if leak {
-		issues = append(issues, issue{"orange", "Listener-Leak (`MaxListenersExceededWarning`) — Watcher degradiert evtl., Neustart hilft"})
-	}
 	if haveUptime && uptime > uptimeWarnH*time.Hour {
 		issues = append(issues, issue{"orange", fmt.Sprintf("Uptime %s (>%dh) — Watcher-Degradation möglich; Auto-Neustart prüfen", upStr, uptimeWarnH)})
+	}
+
+	// The leak no longer colours the status (2026-07-30). Over the whole log:
+	// 46 daemon instances, 8 of them warned, and every one of those warned
+	// *exactly twice* — never once, never three times. Node emits
+	// MaxListenersExceededWarning once per EventTarget when the 11th listener
+	// is added and never again, so this is a startup artefact, not a trend. It
+	// cannot escalate, and dylan's monitor.sh never acted on it anyway (it
+	// restarts on 🔴 or uptime>=24h) — it just pinned /monitor at 🟠 for the
+	// instance's whole life. Kept as a detail line.
+	var infos []string
+	if leak {
+		infos = append(infos, "`MaxListenersExceededWarning` beim Start dieser Instanz — Startartefakt (feuert 2× oder nie), kein Verlaufssignal; gegen echte Watcher-Degradation greift der 24h-Neustart")
 	}
 
 	emoji := map[string]string{"lock": "🔒", "red": "🔴", "orange": "🟠"}
@@ -131,6 +141,9 @@ func main() {
 		}
 	}
 
+	for _, msg := range infos {
+		fmt.Printf("- ℹ️ %s\n", msg)
+	}
 	if log == "" {
 		fmt.Println("- ℹ️ kein Logfile am Pfad (Prozess läuft) — Neustart legt es neu an.")
 	}
