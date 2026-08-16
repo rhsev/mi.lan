@@ -215,6 +215,20 @@ puts "Hello, #{name}!"
 echo "Hello, ${1:-World}!"
 ```
 
+Lookup order is the table's order, so a **compiled binary wins over a
+same-named script**. That is how a slow script gets replaced without its
+endpoint URL changing: build the port next to the original, and the original
+stays as the reference for comparing output.
+
+`scripts/custom/livesync` (source in [cmd/livesync](cmd/livesync)) is the worked
+example — the daemon health check, ported from `livesync.rb` because 106 of its
+185 ms were Ruby starting up for a check that runs every five minutes. The
+endpoint went from 137 ms to 38 ms.
+
+```sh
+go build -o scripts/custom/livesync ./cmd/livesync
+```
+
 Rules:
 
 * Script names: `[a-z0-9_-]` only
