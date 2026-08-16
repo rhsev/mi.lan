@@ -41,6 +41,10 @@ import (
 
 const version = "2.0.1"
 
+// identityAttempts is how often the dylan handshake is tried before giving up;
+// see checkIdentity for why the first attempt regularly needs a second chance.
+const identityAttempts = 3
+
 var (
 	// Tried in order, so a compiled binary (no extension) wins over a
 	// same-named script: that is how a slow script gets replaced by a ported
@@ -923,10 +927,28 @@ func checkIdentity() (string, bool) {
 		return "standalone", true
 	}
 	fmt.Print("Checking identity with Dylan... ")
+
+	// Retry once. The *first* outbound connection of a freshly started milan
+	// regularly needs longer than the 3 s budget, while every attempt after it
+	// answers in milliseconds — reproduced 2026-08-01 with a warm DNS cache, so
+	// it is not name resolution. Most likely Little Snitch verifying the code
+	// identity of an ad-hoc-signed 10 MB binary and caching its verdict.
+	//
+	// Whatever the cause, the symptom was that `milan start` had to be run
+	// twice, which quietly trained everyone to reach for --standalone — giving
+	// up the identity check to work around a first-connection delay.
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(dylanURL)
+	var resp *http.Response
+	var err error
+	for attempt := 1; ; attempt++ {
+		resp, err = client.Get(dylanURL)
+		if err == nil || attempt == identityAttempts {
+			break
+		}
+		time.Sleep(time.Second)
+	}
 	if err != nil {
-		fmt.Printf("FAILED (%v)\n", err)
+		fmt.Printf("FAILED after %d attempts (%v)\n", identityAttempts, err)
 		return "", false
 	}
 	defer resp.Body.Close()
