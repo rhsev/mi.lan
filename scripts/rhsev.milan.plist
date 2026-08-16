@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  LaunchAgent for milan on the Mac mini.
+  LaunchAgent for milan. Replace every /path/to/mi.lan below with the checkout's
+  own path — four occurrences: the binary, the working directory and the two log
+  paths.
 
   A LaunchAgent, not a LaunchDaemon: milan runs scripts that open apps, drive
   Apple Shortcuts and post notifications, all of which need a GUI session. A
-  daemon has none. It lives in /Library/LaunchAgents rather than
-  ~/Library/LaunchAgents because this machine's home is on an external volume
-  that mounts `noowners`, which makes launchd refuse home agents with
-  `Bootstrap failed: 5: EIO`. A global agent runs as the console user, and here
-  that is `extern` — the account milan needs.
+  daemon has none. Install it in /Library/LaunchAgents rather than
+  ~/Library/LaunchAgents when the home directory sits on a volume that mounts
+  `noowners`: launchd refuses a home agent there with `Bootstrap failed: 5: EIO`.
+  A global agent runs as the console user, which is the account milan needs.
 
   Why it exists at all: milan used to be started by hand. A milan started that
   way at boot ended up in a context where its child processes could not resolve
@@ -37,12 +38,12 @@
 
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Volumes/lightning/Git/rhsev/mi.lan/milan</string>
+		<string>/path/to/mi.lan/milan</string>
 		<string>serve</string>
 	</array>
 
 	<key>WorkingDirectory</key>
-	<string>/Volumes/lightning/Git/rhsev/mi.lan</string>
+	<string>/path/to/mi.lan</string>
 
 	<key>RunAtLoad</key>
 	<true/>
@@ -57,8 +58,8 @@
 	</dict>
 
 	<key>StandardOutPath</key>
-	<string>/Volumes/lightning/Git/rhsev/mi.lan/milan.log</string>
+	<string>/path/to/mi.lan/milan.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Volumes/lightning/Git/rhsev/mi.lan/milan.log</string>
+	<string>/path/to/mi.lan/milan.log</string>
 </dict>
 </plist>
