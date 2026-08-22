@@ -55,6 +55,13 @@
 	<dict>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<!-- register-based scripts (scripts/id.rb) need the notes index, and the
+		     register binary if it is not on PATH. Uncomment and set your paths:
+		<key>GRUBBER_NOTES</key>
+		<string>/path/to/notes</string>
+		<key>REGISTER_BIN</key>
+		<string>/path/to/register</string>
+		-->
 	</dict>
 
 	<key>StandardOutPath</key>
