@@ -42,8 +42,8 @@ iPhone -> Dylan (Synology) -> Milan (Mac) -> Script -> Response
 ## Requirements
 
 * macOS (tested on Sequoia)
-* Go 1.21+ (to build)
 * Ruby 3+ (to run `.rb` scripts)
+* Go 1.21+ — only if you build from source
 
 ## Directory layout
 
@@ -71,9 +71,11 @@ Do not move the binary alone without the config and scripts alongside it.
 
 ## Quick Start
 
+Download the binary from the [latest release](https://github.com/rhsev/mi.lan/releases/latest)
+(`milan-darwin-arm64` for Apple Silicon, `milan-darwin-amd64` for Intel), then:
+
 ```bash
-# Download binary from releases, or build from source:
-go build -o milan .
+chmod +x milan-darwin-arm64 && mv milan-darwin-arm64 milan
 
 # Setup config
 cp config.yaml.example config.yaml
@@ -81,6 +83,12 @@ cp config.yaml.example config.yaml
 
 # Start Milan
 ./milan start
+```
+
+Or build from source instead of downloading:
+
+```bash
+go build -o milan .
 ```
 
 ## Configuration
