@@ -88,7 +88,8 @@ cp config.yaml.example config.yaml
 Or build from source instead of downloading:
 
 ```bash
-go build -o milan .
+make build              # writes ./milan, next to the config it reads
+make install            # copies it to /usr/local/bin (PREFIX=~/.local for a user install)
 ```
 
 ## Configuration
