@@ -89,6 +89,12 @@ cp config.yaml.example config.yaml
 ./milan start --standalone
 ```
 
+The release ships the runner, not the scripts: a fresh install answers
+`/health` and `/status` and lists no endpoints at all. The scripts under
+`scripts/` in this repository are examples (`hello`, `greet`, `counter`) plus
+the tools that travel with milan; clone or copy the ones you want, or write
+your own. An endpoint is any executable file dropped in `scripts_dir`.
+
 `--standalone` skips the identity check. Without it, `milan start` asks Dylan
 who it is and refuses to start when nobody answers. That is what you want once
 Dylan is on the network, and a dead end before that. Point `DYLAN_URL` at
