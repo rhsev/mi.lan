@@ -791,8 +791,22 @@ func mimeForExt(ext string) string {
 		return "image/svg+xml"
 	case ".webp":
 		return "image/webp"
+	case ".heic", ".heif":
+		return "image/heic"
+	case ".avif":
+		return "image/avif"
 	case ".css":
 		return "text/css"
+	// Album attachments. Without a type of their own the browser downloads
+	// them instead of showing them, which defeats a link meant for looking.
+	case ".pdf":
+		return "application/pdf"
+	case ".txt", ".md", ".markdown":
+		return "text/plain; charset=utf-8"
+	case ".mp4", ".m4v":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
 	default:
 		return "application/octet-stream"
 	}

@@ -246,3 +246,22 @@ func TestFindScriptPrecedence(t *testing.T) {
 		}
 	}
 }
+
+// A missing type means the browser downloads the file instead of showing it —
+// the case that matters for album attachments, so the mapping is pinned.
+func TestMimeForExt(t *testing.T) {
+	cases := map[string]string{
+		".png": "image/png",
+		".JPG": "image/jpeg",
+		".pdf": "application/pdf",
+		".md":  "text/plain; charset=utf-8",
+		".mov": "video/quicktime",
+		".zip": "application/octet-stream",
+		"":     "application/octet-stream",
+	}
+	for ext, want := range cases {
+		if got := mimeForExt(ext); got != want {
+			t.Errorf("mimeForExt(%q) = %q, want %q", ext, got, want)
+		}
+	}
+}

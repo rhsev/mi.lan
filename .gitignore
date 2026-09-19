@@ -5,4 +5,5 @@ milan.pid
 milan
 data/
 scripts/custom/
+build.sh
 *.DS_Store
