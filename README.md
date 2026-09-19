@@ -281,6 +281,7 @@ Rules:
 * Timeout: 5 seconds (synchronous execution); no timeout for streams
 * stdout → HTTP response
 * Exit code != 0 → HTTP 422
+* HTML output: escape every interpolated data value at render time (Ruby → `CGI.escapeHTML` / a small `h()` helper, Go → `html/template`, bash → don't build HTML with data). Dylan can't do it for you — by the time it has the assembled HTML, data and markup are already mixed. Scraped content (page titles, descriptions) is attacker-influenceable, so this is not optional for data-bearing HTML.
 
 ## Security
 
