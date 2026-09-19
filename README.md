@@ -72,18 +72,27 @@ Do not move the binary alone without the config and scripts alongside it.
 ## Quick Start
 
 Download the binary from the [latest release](https://github.com/rhsev/mi.lan/releases/latest)
-(`milan-darwin-arm64` for Apple Silicon, `milan-darwin-amd64` for Intel), then:
+(`milan-darwin-arm64` for Apple Silicon, `milan-darwin-amd64` for Intel).
+`config.yaml.example` is attached to the same release, or take it from this
+repository.
 
 ```bash
 chmod +x milan-darwin-arm64 && mv milan-darwin-arm64 milan
+# Downloaded with a browser? Clear the quarantine flag first, or macOS refuses
+# to run an unsigned binary:  xattr -d com.apple.quarantine milan
 
 # Setup config
 cp config.yaml.example config.yaml
 # Edit config.yaml: add allowed IPs
 
 # Start Milan
-./milan start
+./milan start --standalone
 ```
+
+`--standalone` skips the identity check. Without it, `milan start` asks Dylan
+who it is and refuses to start when nobody answers. That is what you want once
+Dylan is on the network, and a dead end before that. Point `DYLAN_URL` at
+your own instance (default `http://dy.lan/whoami`) and drop the flag.
 
 Or build from source instead of downloading:
 
