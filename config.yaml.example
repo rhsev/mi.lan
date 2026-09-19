@@ -9,6 +9,12 @@ milan:
   # Wildcards supported: "192.168.1.*"
   allowed_ips:
     - "192.168.1.*"       # Local subnet
+    # - "192.168.2.*"     # Thunderbolt bridge between two Macs (direct cable).
+                          # A machine reached over the bridge arrives with a
+                          # source address from that subnet and is rejected
+                          # with 403 unless it is listed here. Needed on the
+                          # MacBook since 2026-09-16, when Wi-Fi went away and
+                          # only the cable was left.
     # - "100.64.1.5"      # Tailscale IP
 
   scripts_dir: "./scripts"
