@@ -1162,7 +1162,12 @@ func stop() {
 // A restart under launchd is a kickstart. Stopping and starting by hand races
 // the supervisor: the successor is up before our stop finishes waiting, and the
 // pid file it wrote used to be the one we deleted.
-func restartViaLaunchd() {
+//
+// launchctl itself reports nothing beyond its own exit status, so the checks
+// that `start` performs happen here instead — otherwise a restart would answer
+// with a bare success while milan was still down or unable to reach Dylan, and
+// that is the failure mode this command exists to make visible.
+func restartViaLaunchd(standalone bool) {
 	target := launchdTarget()
 	cmd := exec.Command("launchctl", "kickstart", "-k", target)
 	cmd.Stdout = os.Stdout
@@ -1172,6 +1177,44 @@ func restartViaLaunchd() {
 		os.Exit(1)
 	}
 	fmt.Printf("Restarted via launchd (%s)\n", target)
+
+	if !waitForHealth() {
+		os.Exit(1)
+	}
+	if !standalone {
+		if _, ok := checkIdentity(); !ok {
+			os.Exit(1)
+		}
+	}
+}
+
+// waitForHealth polls the local port until milan answers, the same budget start
+// gives a fresh process. Reports the pid it found, so a restart says which
+// process it left behind.
+func waitForHealth() bool {
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Println("Error:", err)
+		return false
+	}
+	client := &http.Client{Timeout: time.Second}
+	healthURL := fmt.Sprintf("http://localhost:%d/health", cfg.Milan.Port)
+	for i := 0; i < 8; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if resp, err := client.Get(healthURL); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				if pid, ok := isRunning(); ok {
+					fmt.Printf("Milan serving (PID %d)\n", pid)
+				} else {
+					fmt.Println("Milan serving")
+				}
+				return true
+			}
+		}
+	}
+	fmt.Printf("Milan is not answering on port %d — check %s\n", cfg.Milan.Port, logPath)
+	return false
 }
 
 func status() {
@@ -1227,7 +1270,7 @@ func main() {
 		stop()
 	case "restart":
 		if managedByLaunchd() {
-			restartViaLaunchd()
+			restartViaLaunchd(standalone)
 		} else {
 			stop()
 			start(standalone)
