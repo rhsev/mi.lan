@@ -265,3 +265,63 @@ func TestMimeForExt(t *testing.T) {
 		}
 	}
 }
+
+// The bug this pins: `milan stop` under launchd killed its process, launchd
+// brought a successor up within the second, the successor wrote its own pid —
+// and stop's unconditional cleanup then deleted that file. Milan was left
+// serving happily while status said "not running" and start said "port in use".
+func TestRemovePidFileKeepsASuccessorsFile(t *testing.T) {
+	dir := t.TempDir()
+	old := pidFile
+	pidFile = filepath.Join(dir, "milan.pid")
+	defer func() { pidFile = old }()
+
+	if err := os.WriteFile(pidFile, []byte("20235\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removePidFileIf(16962) // the process we killed, not the one in the file
+
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("successor's pid file was deleted: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "20235" {
+		t.Errorf("pid file = %q, want 20235", strings.TrimSpace(string(data)))
+	}
+}
+
+func TestRemovePidFileDropsOurOwn(t *testing.T) {
+	dir := t.TempDir()
+	old := pidFile
+	pidFile = filepath.Join(dir, "milan.pid")
+	defer func() { pidFile = old }()
+
+	if err := os.WriteFile(pidFile, []byte("16962"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removePidFileIf(16962)
+
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Errorf("own pid file survived: %v", err)
+	}
+}
+
+// A file we cannot read is stale by definition — clearing it is the point.
+func TestRemovePidFileDropsGarbage(t *testing.T) {
+	dir := t.TempDir()
+	old := pidFile
+	pidFile = filepath.Join(dir, "milan.pid")
+	defer func() { pidFile = old }()
+
+	if err := os.WriteFile(pidFile, []byte("not a pid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removePidFileIf(16962)
+
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Errorf("garbage pid file survived: %v", err)
+	}
+}

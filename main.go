@@ -898,7 +898,7 @@ func serve() {
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-stop
-		os.Remove(pidFile)
+		removePidFileIf(os.Getpid())
 		fmt.Println("\nMilan stopped.")
 		os.Exit(0)
 	}()
@@ -911,6 +911,37 @@ func serve() {
 }
 
 // ─── Control commands ────────────────────────────────────────────────────────
+
+// launchdLabel is the LaunchAgent that owns milan when it is installed as one
+// (scripts/rhsev.milan.plist).
+const launchdLabel = "rhsev.milan"
+
+// managedByLaunchd reports whether that agent is loaded in this GUI domain.
+// It matters because launchd undoes every stop within the second: start and
+// stop are then not ours to issue, and pretending otherwise leaves the user
+// with "Stopped." followed by "Port 8080 in use".
+func managedByLaunchd() bool {
+	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
+	return exec.Command("launchctl", "print", target).Run() == nil
+}
+
+func launchdTarget() string {
+	return fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
+}
+
+// removePidFileIf drops the pid file only while it still names the process we
+// mean to forget. Under a restarting supervisor a successor may already have
+// written its own pid there, and removing that one leaves a healthy milan
+// invisible to status and stop while the port stays busy for start.
+func removePidFileIf(pid int) {
+	data, err := os.ReadFile(pidFile)
+	if err == nil {
+		if cur, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && cur != pid {
+			return
+		}
+	}
+	os.Remove(pidFile)
+}
 
 func isRunning() (int, bool) {
 	data, err := os.ReadFile(pidFile)
@@ -1015,6 +1046,10 @@ func start(standalone bool) {
 	}
 	if portInUse(port) {
 		fmt.Printf("Port %d in use — cannot start\n", port)
+		if managedByLaunchd() {
+			fmt.Printf("Milan runs under launchd (%s) and is most likely already serving.\n", launchdTarget())
+			fmt.Printf("  restart:  launchctl kickstart -k %s\n", launchdTarget())
+		}
 		os.Exit(1)
 	}
 
@@ -1088,7 +1123,18 @@ func start(standalone bool) {
 	}
 }
 
+// Under launchd a hand-rolled stop is undone within the second, and the
+// successor's pid file is what our own cleanup would delete. So say what is
+// going on and name the command that actually works, rather than reporting
+// "Stopped." about a process that is already back.
 func stop() {
+	if managedByLaunchd() {
+		fmt.Printf("Milan runs under launchd (%s) — a stop here comes straight back.\n", launchdTarget())
+		fmt.Printf("  restart:  launchctl kickstart -k %s\n", launchdTarget())
+		fmt.Printf("  stop:     launchctl bootout %s\n", launchdTarget())
+		os.Exit(1)
+	}
+
 	pid, ok := isRunning()
 	if !ok {
 		fmt.Println("Milan not running")
@@ -1109,8 +1155,23 @@ func stop() {
 	if !stopped {
 		proc.Signal(syscall.SIGKILL)
 	}
-	os.Remove(pidFile)
+	removePidFileIf(pid)
 	fmt.Println("Stopped.")
+}
+
+// A restart under launchd is a kickstart. Stopping and starting by hand races
+// the supervisor: the successor is up before our stop finishes waiting, and the
+// pid file it wrote used to be the one we deleted.
+func restartViaLaunchd() {
+	target := launchdTarget()
+	cmd := exec.Command("launchctl", "kickstart", "-k", target)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "launchctl kickstart -k %s failed: %v\n", target, err)
+		os.Exit(1)
+	}
+	fmt.Printf("Restarted via launchd (%s)\n", target)
 }
 
 func status() {
@@ -1165,8 +1226,12 @@ func main() {
 	case "stop":
 		stop()
 	case "restart":
-		stop()
-		start(standalone)
+		if managedByLaunchd() {
+			restartViaLaunchd()
+		} else {
+			stop()
+			start(standalone)
+		}
 	case "status":
 		status()
 	case "log":
