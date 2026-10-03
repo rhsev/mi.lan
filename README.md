@@ -120,7 +120,7 @@ trust chain needed. That is what the warning means by `build.sh`; yours
 needs just two lines:
 
 ```bash
-go build -o milan .
+make build              # not bare `go build`: make stamps the version from the tag
 codesign -f -s "your-dev-cert" milan
 ```
 

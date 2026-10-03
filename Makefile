@@ -7,10 +7,15 @@ PREFIX ?= /usr/local
 # health check, which lives in the machine-local scripts/custom/ and is built
 # rather than shipped. Convention: ../BUILD.md.
 
+# Stamp the version from the tag rather than trusting a literal in main.go,
+# which shipped 2.2.0 as 2.1.0. A dirty or untagged tree says so in /status.
+VERSION := $(shell git describe --tags --dirty --always 2>/dev/null | sed 's/^v//')
+LDFLAGS := -X main.version=$(VERSION)
+
 .PHONY: build install uninstall livesync reach link unlink test clean
 
 build:
-	go build -o $(BIN) .
+	go build -ldflags="$(LDFLAGS)" -o $(BIN) .
 
 livesync:
 	go build -o scripts/custom/livesync ./cmd/livesync
@@ -60,5 +65,5 @@ release:
 	@mkdir -p dist
 	@for t in $(RELEASE_TARGETS); do \
 		echo "dist/$(BIN)-$$t"; \
-		GOOS=$${t%%-*} GOARCH=$${t##*-} CGO_ENABLED=0 go build -o dist/$(BIN)-$$t . || exit 1; \
+		GOOS=$${t%%-*} GOARCH=$${t##*-} CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/$(BIN)-$$t . || exit 1; \
 	done

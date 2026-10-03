@@ -45,7 +45,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const version = "2.3.0"
+// version is stamped from the tag at build time (-ldflags -X, see Makefile and
+// build.sh): the literal it replaced shipped 2.2.0 as 2.1.0. A plain `go build`
+// cannot know it and says "dev"; Go's own git stamp does not help here, since
+// the module path carries no /v2 and so reads every tag as v0.0.0.
+var version = "dev"
 
 // identityAttempts is how often the dylan handshake is tried before giving up;
 // see checkIdentity for why the first attempt regularly needs a second chance.
