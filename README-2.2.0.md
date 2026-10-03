@@ -1,0 +1,335 @@
+# mi.lan (Milan)
+
+[![test](https://github.com/rhsev/mi.lan/actions/workflows/test.yml/badge.svg)](https://github.com/rhsev/mi.lan/actions/workflows/test.yml)
+
+A lightweight URL bridge for macOS automation.
+
+Milan is a HTTP agent designed to execute local scripts and Apple Shortcuts via simple URL calls. It acts as a persistent bridge, allowing you to trigger local automation from any HTTP-capable source (browser, curl, Stream Deck, or other scripts).
+
+It can do both:
+
+* Standalone: It works perfectly as a standalone tool on your Mac.
+* Companion: It connects with [dy.lan](https://github.com/rhsev/dy.lan) to act as the remote helper for your Mac, allowing you to trigger complex workflows from any device on your local (or Tailscale) network.
+
+## Why Milan?
+
+* URL Triggers: Turn any local script into an HTTP endpoint instantly.
+* Speed: Persistent agent design ensures execution in ~120ms for scripts (and ~1 sec for Shortcuts).
+* Simplicity: Single Go binary, no runtime dependencies.
+* Privacy: Strict IP allow-listing and no external cloud services.
+* Reach: Reach your Mac via Dylan from any network (LAN/VPN).
+* Security: Identity verification with the Dylan master at startup.
+
+## The Bridge: Server Redirector to macOS Agents
+
+Milan creates a connection between your server and your client. It establishes a clear separation between logic and execution:
+
+* dy.lan (The Redirector): Your central hub and logic engine running on Docker or Synology. It identifies where a request needs to go and "points" the way.
+* mi.lan (The Agent): The local executor on your Mac. It waits for instructions and handles the heavy lifting, like running scripts or Apple Shortcuts.
+
+### The Workflow
+
+1. Request: A client (like your iPhone) sends a request to the redirector (e.g., `http://mi.lan/mini/shortcut/Note`).
+2. Handshake: Before starting, the agent can ask the redirector "Who am I?" via `http://dy.lan/whoami` to ensure the bridge is correctly configured.
+3. Redirection: The hub recognizes the target agent ("mini") and passes the request to the specific Mac's IP (e.g., `192.168.1.118:8080`).
+4. Execution: The agent performs the local action and sends the result back.
+
+```
+iPhone -> Dylan (Synology) -> Milan (Mac) -> Script -> Response
+
+```
+
+## Requirements
+
+* macOS (tested on Sequoia)
+* Ruby 3+ (to run `.rb` scripts)
+* Go 1.21+ — only if you build from source
+
+## Directory layout
+
+Milan resolves all paths relative to its own binary:
+
+```
+milan-dir/
+├── milan              # binary
+├── config.yaml        # your config (copy from config.yaml.example)
+├── scripts/           # scripts served as HTTP endpoints
+│   └── custom/        # private scripts (gitignored)
+├── data/              # background job logs (auto-created)
+└── milan.log          # runtime log
+```
+
+Keep the binary and `config.yaml` in the same directory. To call `milan` from
+anywhere, create a symlink — Milan uses `filepath.EvalSymlinks` internally and
+resolves the real binary location correctly:
+
+```bash
+ln -sf /path/to/milan-dir/milan /usr/local/bin/milan
+```
+
+Do not move the binary alone without the config and scripts alongside it.
+
+## Quick Start
+
+Download the binary from the [latest release](https://github.com/rhsev/mi.lan/releases/latest)
+(`milan-darwin-arm64` for Apple Silicon, `milan-darwin-amd64` for Intel).
+`config.yaml.example` is attached to the same release, or take it from this
+repository.
+
+```bash
+chmod +x milan-darwin-arm64 && mv milan-darwin-arm64 milan
+# Downloaded with a browser? Clear the quarantine flag first, or macOS refuses
+# to run an unsigned binary:  xattr -d com.apple.quarantine milan
+
+# Setup config
+cp config.yaml.example config.yaml
+# Edit config.yaml: add allowed IPs
+
+# Start Milan
+./milan start --standalone
+```
+
+The release ships the runner, not the scripts: a fresh install answers
+`/health` and `/status` and lists no endpoints at all. The scripts under
+`scripts/` in this repository are examples (`hello`, `greet`, `counter`) plus
+the tools that travel with milan; clone or copy the ones you want, or write
+your own. An endpoint is any executable file dropped in `scripts_dir`.
+
+`--standalone` skips the identity check. Without it, `milan start` asks Dylan
+who it is and refuses to start when nobody answers. That is what you want once
+Dylan is on the network, and a dead end before that. Point `DYLAN_URL` at
+your own instance (default `http://dy.lan/whoami`) and drop the flag.
+
+Or build from source instead of downloading:
+
+```bash
+make build              # writes ./milan, next to the config it reads
+make install            # copies it to /usr/local/bin (PREFIX=~/.local for a user install)
+```
+
+## Configuration
+
+`config.yaml` (copy from `config.yaml.example`):
+
+```yaml
+milan:
+  port: 8080
+  allowed_ips:
+    - "192.168.1.*"
+  scripts_dir: "./scripts"
+  notes:
+    - id: my-notes
+      path: /path/to/notes
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `port` | `8080` | HTTP port Milan listens on |
+| `allowed_ips` | — | IPs allowed to trigger scripts. Wildcards supported (`192.168.1.*`). Localhost is always allowed |
+| `scripts_dir` | `./scripts` | Directory for scripts, relative to the binary |
+| `notes` | — | List of note sources (see [Notes / Wiki](#notes--wiki)) |
+
+## Usage Examples
+
+Via Dylan (Remote):
+
+* `http://mi.lan/hello` triggers `./scripts/hello.rb` on your Mac via Dylan
+* `http://mi.lan/shortcut/Note` triggers Apple Shortcut "Note"
+* `http://mi.lan/shortcut/Note/Hello%20Milan` triggers Shortcut "Note" with input "Hello Milan"
+
+Standalone (Local):
+
+* `http://localhost:8080/hello/World` runs `scripts/hello.rb` with "World" as `ARGV[0]` locally on your Mac
+* `http://localhost:8080` sends status information
+
+## Streaming
+
+Scripts can stream output line by line via SSE (Server-Sent Events):
+
+```
+GET /stream/<script>
+GET /stream/<script>/<arg>
+```
+
+The response is a `text/event-stream`. Each line of stdout is sent as a `data:` event. When the script finishes, Milan sends `event: done`. On non-zero exit: `event: stream_error`.
+
+**Background mode:** If the client disconnects mid-stream, Milan switches to silent mode — the script continues running, collects output into a log file, and records a background job entry when it finishes.
+
+## Background Jobs
+
+When a stream is abandoned, Milan records the job in `data/jobs/status.json`:
+
+```
+GET /jobs/all       → all job records (JSON)
+GET /jobs/pending   → unacknowledged jobs
+GET /jobs/ack/<id>  → mark job as acknowledged
+```
+
+Jobs are identified by `<script>_<timestamp>` and include script name, exit status, log path, timestamp, and acknowledged flag. History is capped at 100 entries.
+
+## Widget Inbox
+
+A place for scripts to leave their state. One target is one state, not a log:
+a push overwrites the previous one, so a copy job can rewrite itself once a
+second without piling up 400 progress lines. Dylan's board reads all targets
+at once and draws them as tiles.
+
+```
+POST   /widget/<target>        → push (JSON body, or text/plain + query params)
+GET    /widgets                → every target as one JSON array
+DELETE /widget/<target>        → remove the tile
+GET    /widget/<target>/clear  → same, for callers that cannot send DELETE
+```
+
+Targets must match `^[a-z0-9_-]{1,32}$` — they are path segments on disk
+(`data/widgets/<target>.json`, written atomically). Fields, all optional
+except the target: `title`, `text`, `progress` (0–100), `icon`, `color`,
+`urgent`, `ttl`, `sort`. The server adds `updated_at`.
+
+`ttl` (seconds) marks how long the state stays valid — the board greys the
+tile out afterwards instead of deleting it. Without `ttl` the tile stands
+until something replaces it. `text` may contain ANSI; Milan stores it raw and
+lets the display side decide. With `urgent: true` the text additionally goes
+through [ticker](https://github.com/rhsev/ticker) once, on arrival.
+
+`scripts/widget` is the client — a thin curl wrapper, no second binary:
+
+```bash
+widget copy --text "Backup läuft" --progress 42 --icon download --ttl 120
+na | widget na --color '#A3BE8C'      # stdin becomes the text
+widget copy --clear
+```
+
+It talks to `http://127.0.0.1:8080` unless `MILAN_URL` says otherwise;
+localhost is always allowed, so local scripts push without any configuration.
+
+## Notes / Wiki
+
+Milan can serve Markdown and HTML files from configured directories:
+
+```
+GET /notes                          → list sources (JSON)
+GET /notes/<source>                 → list files in source (JSON)
+GET /notes/<source>/<file>          → render file (HTML)
+GET /notes/<source>/assets/<path>   → serve asset (image or CSS)
+```
+
+Markdown files are rendered via [Apex](https://github.com/ttscoff/apex). HTML files are served as-is. Both `images/` and `css/` subdirectories are served as assets.
+
+Configure sources in `config.yaml`:
+
+```yaml
+milan:
+  notes:
+    - id: my-notes
+      path: /path/to/notes/directory
+```
+
+Via URL Scheme:
+
+* `milan://hello/World` runs `scripts/hello.rb` — same as the HTTP call, but without opening Safari
+* `milan://stream/hello/World` uses the streaming endpoint — required for long-running scripts or GUI apps
+* `ref://` works the same way as `milan://`, but is intended for document references rather than script execution
+
+The `milan://` and `ref://` URL schemes are handled by [ticker](https://github.com/rhsev/ticker), which registers them as part of its app bundle. No separate URL handler app is needed.
+
+## Service Control (milan)
+
+```bash
+./milan start                # Start with Dylan identity check
+./milan start --standalone   # Start without Dylan
+./milan stop                 # Stop service
+./milan restart --standalone # Restart service
+./milan status               # Show status and PID
+./milan log                  # Tail the log file
+./milan whoami               # Check identity with Dylan
+```
+
+`milan` is reliable across restarts: it detects stale PID files, clears any process holding the port (via `lsof`), and waits for the HTTP health endpoint to respond before reporting success.
+
+## Writing Scripts
+
+Scripts live in `./scripts/` (or `./scripts/custom/` for private scripts, gitignored) and receive URL path segments as arguments. Supported types:
+
+| Extension | Interpreter |
+|-----------|-------------|
+| `.rb`     | Ruby        |
+| `.sh`     | sh          |
+| `.py`     | python3     |
+| (none)    | direct (needs executable bit) |
+
+Apple Shortcuts are handled by `scripts/shortcut.rb` via the `shortcuts` CLI — no special extension needed.
+
+Examples:
+
+```ruby
+# scripts/hello.rb
+#!/usr/bin/env ruby
+name = ARGV[0] || 'World'
+puts "Hello, #{name}!"
+```
+
+```bash
+# scripts/greet.sh
+#!/bin/sh
+echo "Hello, ${1:-World}!"
+```
+
+Lookup order is the table's order, so a **compiled binary wins over a
+same-named script**. That is how a slow script gets replaced without its
+endpoint URL changing: build the port next to the original, and the original
+stays as the reference for comparing output.
+
+`scripts/custom/livesync` (source in [cmd/livesync](cmd/livesync)) is the worked
+example — the daemon health check, ported from `livesync.rb` because 106 of its
+185 ms were Ruby starting up for a check that runs every five minutes. The
+endpoint went from 137 ms to 38 ms.
+
+```sh
+go build -o scripts/custom/livesync ./cmd/livesync
+```
+
+Rules:
+
+* Script names: `[a-z0-9_-]` only
+* One script per name — `hello.rb` and `hello.sh` together cause a 500 error
+* Timeout: 5 seconds (synchronous execution); no timeout for streams
+* stdout → HTTP response
+* Exit code != 0 → HTTP 422
+* HTML output: escape every interpolated data value at render time (Ruby → `CGI.escapeHTML` / a small `h()` helper, Go → `html/template`, bash → don't build HTML with data). Dylan can't do it for you — by the time it has the assembled HTML, data and markup are already mixed. Scraped content (page titles, descriptions) is attacker-influenceable, so this is not optional for data-bearing HTML.
+
+## Security
+
+* IP Allowlist: Only configured IPs can trigger scripts
+* Wildcards: `192.168.1.*` allows entire subnet
+* Localhost: Always allowed (127.0.0.1, ::1)
+* Script Names: Validated (no path traversal possible)
+
+## Dylan Integration
+
+To connect Dylan to Milan agents, configure `config/milan.yaml` on Dylan:
+
+```yaml
+milan:
+  enabled: true
+  agents:
+    mini: "http://192.168.1.118:8080"   # Mac Mini
+    book: "http://192.168.1.188:8080"   # MacBook
+
+```
+
+With the `35-milan-connect.rb` plugin, requests are routed through Dylan:
+
+```
+http://mi.lan/mini/hello/World  ->  Mac Mini: GET /hello/World
+http://mi.lan/book/shortcut/Note  ->  MacBook: GET /shortcut/Note
+
+```
+
+## License
+
+MIT
+
+---
+
+*Part of a family of plain-text tools — the [profile page](https://github.com/rhsev) has the map.*
