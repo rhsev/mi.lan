@@ -2,9 +2,9 @@
 
 [![test](https://github.com/rhsev/mi.lan/actions/workflows/test.yml/badge.svg)](https://github.com/rhsev/mi.lan/actions/workflows/test.yml)
 
-A lightweight URL bridge for macOS automation.
+A lightweight URL bridge for local automation.
 
-Milan is a HTTP agent designed to execute local scripts and Apple Shortcuts via simple URL calls. It acts as a persistent bridge, allowing you to trigger local automation from any HTTP-capable source (browser, curl, Stream Deck, or other scripts).
+Milan is a HTTP agent designed to execute local scripts — and, on macOS, Apple Shortcuts — via simple URL calls. It acts as a persistent bridge, allowing you to trigger local automation from any HTTP-capable source (browser, curl, Stream Deck, or other scripts). It also works as a webhook receiver: signed POST bodies reach scripts on stdin.
 
 It can do both:
 
@@ -41,7 +41,8 @@ iPhone -> Dylan (Synology) -> Milan (Mac) -> Script -> Response
 
 ## Requirements
 
-* macOS (tested on Sequoia)
+* macOS (tested on Sequoia) or Linux — the binaries are static, any distro
+  works; `scripts/milan.service` is a systemd unit to start from
 * Ruby 3+ (to run `.rb` scripts)
 * Go 1.21+ — only if you build from source
 
@@ -72,7 +73,8 @@ Do not move the binary alone without the config and scripts alongside it.
 ## Quick Start
 
 Download the binary from the [latest release](https://github.com/rhsev/mi.lan/releases/latest)
-(`milan-darwin-arm64` for Apple Silicon, `milan-darwin-amd64` for Intel).
+(`milan-darwin-arm64` for Apple Silicon, `milan-darwin-amd64` for Intel,
+`milan-linux-amd64` / `milan-linux-arm64` for Linux).
 `config.yaml.example` is attached to the same release, or take it from this
 repository.
 
@@ -125,8 +127,10 @@ milan:
 | Key | Default | Description |
 |---|---|---|
 | `port` | `8080` | HTTP port Milan listens on |
+| `bind` | all interfaces | Single address to listen on, e.g. a Tailscale IP. Empty keeps the old behaviour |
 | `allowed_ips` | — | IPs allowed to trigger scripts. Wildcards supported (`192.168.1.*`). Localhost is always allowed |
 | `scripts_dir` | `./scripts` | Directory for scripts, relative to the binary |
+| `secrets` | — | Per-script HMAC secrets (see [Signed requests](#signed-requests)) |
 | `notes` | — | List of note sources (see [Notes / Wiki](#notes--wiki)) |
 
 ## Usage Examples
@@ -142,6 +146,14 @@ Standalone (Local):
 * `http://localhost:8080/hello/World` runs `scripts/hello.rb` with "World" as `ARGV[0]` locally on your Mac
 * `http://localhost:8080` sends status information
 
+A POST body reaches the script on stdin, raw — the script decides what it
+means (parse it with `jq`, `JSON.parse`, or ignore it). URL argument and body
+combine freely:
+
+```bash
+curl -d '{"branch":"main"}' http://localhost:8080/deploy
+```
+
 ## Streaming
 
 Scripts can stream output line by line via SSE (Server-Sent Events):
@@ -151,7 +163,7 @@ GET /stream/<script>
 GET /stream/<script>/<arg>
 ```
 
-The response is a `text/event-stream`. Each line of stdout is sent as a `data:` event. When the script finishes, Milan sends `event: done`. On non-zero exit: `event: stream_error`.
+The response is a `text/event-stream`. Each line of stdout is sent as a `data:` event. When the script finishes, Milan sends `event: done`. On non-zero exit: `event: stream_error`. A POST body reaches stream scripts on stdin, same as one-shot calls.
 
 **Background mode:** If the client disconnects mid-stream, Milan switches to silent mode — the script continues running, collects output into a log file, and records a background job entry when it finishes.
 
@@ -247,6 +259,8 @@ The `milan://` and `ref://` URL schemes are handled by [ticker](https://github.c
 
 `milan` is reliable across restarts: it detects stale PID files, clears any process holding the port (via `lsof`), and waits for the HTTP health endpoint to respond before reporting success.
 
+Under a supervisor, restart through it instead: milan detects launchd itself and says so; under systemd use `systemctl restart milan` (see the notes in `scripts/milan.service`).
+
 ## Writing Scripts
 
 Scripts live in `./scripts/` (or `./scripts/custom/` for private scripts, gitignored) and receive URL path segments as arguments. Supported types:
@@ -294,6 +308,7 @@ Rules:
 * Script names: `[a-z0-9_-]` only
 * One script per name — `hello.rb` and `hello.sh` together cause a 500 error
 * Timeout: 5 seconds (synchronous execution); no timeout for streams
+* POST body → stdin (capped at 10 MB)
 * stdout → HTTP response
 * Exit code != 0 → HTTP 422
 * HTML output: escape every interpolated data value at render time (Ruby → `CGI.escapeHTML` / a small `h()` helper, Go → `html/template`, bash → don't build HTML with data). Dylan can't do it for you — by the time it has the assembled HTML, data and markup are already mixed. Scraped content (page titles, descriptions) is attacker-influenceable, so this is not optional for data-bearing HTML.
@@ -303,7 +318,31 @@ Rules:
 * IP Allowlist: Only configured IPs can trigger scripts
 * Wildcards: `192.168.1.*` allows entire subnet
 * Localhost: Always allowed (127.0.0.1, ::1)
+* Bind: `bind:` narrows the listener to one interface — what does not listen cannot be attacked
+* Signatures: scripts listed under `secrets:` require a signed request body
 * Script Names: Validated (no path traversal possible)
+
+## Signed Requests
+
+For callers whose address cannot be allowlisted — a cloud service's webhook
+arriving through a reverse proxy — list the script under `secrets:` and sign
+the raw request body the way GitHub does:
+
+```yaml
+milan:
+  secrets:
+    deploy: "long-random-string"
+```
+
+```bash
+sig=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')
+curl -d "$body" -H "X-Hub-Signature-256: sha256=$sig" http://host:8080/deploy
+```
+
+A listed script answers 403 unless the signature matches (a GET needs the
+signature of the empty body); scripts without an entry stay open. The IP
+allowlist still applies first — for webhook senders, allowlist the proxy and
+let the signature do the real work.
 
 ## Dylan Integration
 
