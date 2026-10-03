@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -480,5 +481,19 @@ func TestRemovePidFileDropsGarbage(t *testing.T) {
 
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Errorf("garbage pid file survived: %v", err)
+	}
+}
+
+// `go test` links an ad-hoc signed binary on macOS — exactly the build the
+// warning exists for — so the test binary itself must trip it.
+func TestSignatureWarningOnAdHocBuild(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		if w := signatureWarning(); w != "" {
+			t.Fatalf("no signature check off macOS, got %q", w)
+		}
+		return
+	}
+	if w := signatureWarning(); !strings.Contains(w, "ad-hoc") {
+		t.Fatalf("ad-hoc test binary not flagged, got %q", w)
 	}
 }

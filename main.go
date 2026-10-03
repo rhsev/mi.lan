@@ -33,6 +33,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -316,6 +317,9 @@ type Server struct {
 	scripts   atomic.Int64
 	startedAt time.Time
 	jobsMu    sync.Mutex
+	// signWarning is set at startup when the binary's code signature will not
+	// keep its macOS grants (see signatureWarning); empty otherwise.
+	signWarning string
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -343,6 +347,9 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, ip string) {
 		s.handleStatus(w)
 	case p == "/health":
 		w.Header().Set("Content-Type", "text/plain")
+		if s.signWarning != "" {
+			w.Header().Set("X-Milan-Warning", s.signWarning)
+		}
 		fmt.Fprint(w, "OK")
 	case p == "/list":
 		writeJSON(w, map[string]any{"scripts": s.listScripts()})
@@ -388,7 +395,7 @@ func splitScriptPath(rest string) (script, arg string) {
 
 func (s *Server) handleStatus(w http.ResponseWriter) {
 	uptime := time.Since(s.startedAt).Round(time.Second)
-	writeJSON(w, map[string]any{
+	data := map[string]any{
 		"service":           "milan",
 		"version":           version,
 		"listen":            s.config.listenAddr(),
@@ -397,7 +404,11 @@ func (s *Server) handleStatus(w http.ResponseWriter) {
 		"scripts_run":       s.scripts.Load(),
 		"available_scripts": s.listScripts(),
 		"scripts_dir":       s.config.Milan.ScriptsDir,
-	})
+	}
+	if s.signWarning != "" {
+		data["warning"] = s.signWarning
+	}
+	writeJSON(w, data)
 }
 
 // ─── Script lookup ────────────────────────────────────────────────────────────
@@ -968,6 +979,33 @@ func (s *Server) logf(level, format string, args ...any) {
 	fmt.Printf("[%s] %-5s %s\n", ts, strings.ToUpper(level), msg)
 }
 
+// ─── Code signature ──────────────────────────────────────────────────────────
+
+// signatureWarning reports a macOS build whose code signature is ad-hoc (what a
+// bare `go build` produces) or missing. The grants macOS and Little Snitch tie
+// to milan's code identity — Local Network access above all — do not carry
+// over to such a binary. macOS may then deny without asking: on 2026-09-28 every
+// LAN address failed with "no route to host" from scripts while internet and
+// ping kept working, which took half an hour to trace back to the build.
+// Empty when the signature is stable or the check does not apply.
+func signatureWarning() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	out, _ := exec.Command("codesign", "-dv", exe).CombinedOutput()
+	switch s := string(out); {
+	case strings.Contains(s, "Signature=adhoc"):
+		return "ad-hoc signed build: macOS may deny LAN access to scripts; sign with a stable identity (build.sh)"
+	case strings.Contains(s, "not signed at all"):
+		return "unsigned build: macOS may deny LAN access to scripts; sign with a stable identity (build.sh)"
+	}
+	return ""
+}
+
 // ─── HTTP helper ─────────────────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -996,6 +1034,9 @@ func serve() {
 	fmt.Printf("Scripts:     %s\n", cfg.Milan.ScriptsDir)
 	fmt.Printf("Allowed IPs: %s\n", strings.Join(cfg.Milan.AllowedIPs, ", "))
 	fmt.Printf("Ruby:        %s\n", rubyBin)
+	if srv.signWarning = signatureWarning(); srv.signWarning != "" {
+		fmt.Printf("\033[33mWARNING:     %s\033[0m\n", srv.signWarning)
+	}
 	fmt.Println(strings.Repeat("─", 40))
 
 	srv.startCron()
@@ -1355,6 +1396,9 @@ func status() {
 	}
 	fmt.Printf("Uptime: %vs | Requests: %v | Scripts: %v\n",
 		data["uptime_seconds"], data["requests"], data["scripts_run"])
+	if warning, _ := data["warning"].(string); warning != "" {
+		fmt.Printf("WARNING: %s\n", warning)
+	}
 }
 
 // ─── Utility ─────────────────────────────────────────────────────────────────
