@@ -1,0 +1,34 @@
+# systemd unit for milan — the Linux counterpart of rhsev.milan.plist.
+# Replace /path/to/mi.lan (three occurrences) and User, then:
+#
+#   sudo cp scripts/milan.service /etc/systemd/system/milan.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now milan
+#
+# Restart after a deploy (this is the way — not `milan restart`):
+#   sudo systemctl restart milan
+#
+# Runs `serve` (the foreground server), not `start`, for the same reason the
+# LaunchAgent does: `start` daemonises and exits, and the supervisor would
+# restart it forever. stdout goes to the journal (journalctl -u milan);
+# milan.log next to the binary is not written under systemd, so `milan log`
+# has nothing to tail here.
+#
+# The unit file lives in scripts/ next to the plist but is not an endpoint:
+# script names never contain a dot, so nothing can call it.
+
+[Unit]
+Description=milan — URL bridge for local automation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=admin
+WorkingDirectory=/path/to/mi.lan
+ExecStart=/path/to/mi.lan/milan serve
+# on-failure, not always: `milan stop` exits 0 and stays down, a crash comes back.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
