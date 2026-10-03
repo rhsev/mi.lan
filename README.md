@@ -109,6 +109,21 @@ make build              # writes ./milan, next to the config it reads
 make install            # copies it to /usr/local/bin (PREFIX=~/.local for a user install)
 ```
 
+One macOS trap when building yourself: a bare `go build` leaves an *ad-hoc*
+code signature that changes with every build, and macOS ties the "Local
+Network" permission to the signature — a rebuilt milan can silently lose LAN
+access to its scripts, while internet and ping keep working. milan flags
+such a build at startup, in `/status`, in `milan status`, and as an
+`X-Milan-Warning` header on `/health`. The fix is signing with a stable
+identity after every build — a self-signed certificate is enough, no
+trust chain needed. That is what the warning means by `build.sh`; yours
+needs just two lines:
+
+```bash
+go build -o milan .
+codesign -f -s "your-dev-cert" milan
+```
+
 ## Configuration
 
 `config.yaml` (copy from `config.yaml.example`):
