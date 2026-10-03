@@ -18,3 +18,15 @@ milan:
     # - "100.64.1.5"      # Tailscale IP
 
   scripts_dir: "./scripts"
+
+  # Listen on one address instead of all interfaces (default: all). On a
+  # machine with a public address this is the difference between "protected
+  # by the firewall" and "not listening there at all".
+  # bind: "100.64.1.5"
+
+  # Per-script HMAC secrets (GitHub's webhook scheme). A script listed here
+  # answers 403 unless the caller signs the raw request body:
+  #   X-Hub-Signature-256: sha256=<hex hmac-sha256 of the body>
+  # Scripts without an entry stay open — opt-in, per endpoint.
+  # secrets:
+  #   deploy: "long-random-string"

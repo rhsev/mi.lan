@@ -37,6 +37,41 @@ func TestConfigAllowed(t *testing.T) {
 	}
 }
 
+// With bind set, the machine's own address is the only door the control
+// commands have — it must be trusted like loopback, and only exactly.
+func TestConfigAllowedBindSelf(t *testing.T) {
+	cfg := &Config{Milan: MilanConfig{Bind: "100.86.161.44"}}
+	if !cfg.allowed("100.86.161.44") {
+		t.Error("the bind address itself must be allowed")
+	}
+	if cfg.allowed("100.86.161.45") {
+		t.Error("a neighbouring address must not ride along")
+	}
+	if (&Config{}).allowed("") {
+		t.Error("empty bind must not admit an empty source address")
+	}
+}
+
+func TestListenAddrAndControlURL(t *testing.T) {
+	cases := []struct {
+		bind, listen, control string
+	}{
+		{"", ":8080", "http://localhost:8080/health"},
+		{"0.0.0.0", "0.0.0.0:8080", "http://localhost:8080/health"},
+		{"::", "[::]:8080", "http://localhost:8080/health"},
+		{"100.86.161.44", "100.86.161.44:8080", "http://100.86.161.44:8080/health"},
+	}
+	for _, c := range cases {
+		cfg := &Config{Milan: MilanConfig{Port: 8080, Bind: c.bind}}
+		if got := cfg.listenAddr(); got != c.listen {
+			t.Errorf("listenAddr(bind=%q) = %q, want %q", c.bind, got, c.listen)
+		}
+		if got := cfg.controlURL("/health"); got != c.control {
+			t.Errorf("controlURL(bind=%q) = %q, want %q", c.bind, got, c.control)
+		}
+	}
+}
+
 func TestConfigAllowedWithoutPatterns(t *testing.T) {
 	cfg := &Config{}
 	if cfg.allowed("192.168.1.1") {
@@ -244,6 +279,128 @@ func TestFindScriptPrecedence(t *testing.T) {
 				t.Errorf("listScripts() = %v, should not contain %q", list, unwanted)
 			}
 		}
+	}
+}
+
+// The vectors are openssl's, not this package's own hmac output — a test that
+// computes its expectation with the code under test would pass forever.
+//
+//	printf '%s' 'hello stdin' | openssl dgst -sha256 -hmac 's3cr3t'
+const (
+	sigHelloStdin = "sha256=2af4e91bd5a3a6a4270dd7662b36bed6e411d05c6d12644c42b541c878b7cd40"
+	sigEmptyBody  = "sha256=3c81cc9496e1c25250f6ccb85f697c1bb623e3480d6538ad8cb6a6648142777d"
+)
+
+func TestValidSignature(t *testing.T) {
+	body := []byte("hello stdin")
+	if !validSignature("s3cr3t", body, sigHelloStdin) {
+		t.Error("the openssl vector must verify")
+	}
+	if !validSignature("s3cr3t", nil, sigEmptyBody) {
+		t.Error("an empty body has a signature too")
+	}
+	for name, header := range map[string]string{
+		"missing":      "",
+		"no prefix":    strings.TrimPrefix(sigHelloStdin, "sha256="),
+		"wrong scheme": "sha1=" + strings.TrimPrefix(sigHelloStdin, "sha256="),
+		"bad hex":      "sha256=zz",
+		"wrong body":   sigEmptyBody,
+	} {
+		if validSignature("s3cr3t", body, header) {
+			t.Errorf("%s signature must not verify", name)
+		}
+	}
+	if validSignature("other", body, sigHelloStdin) {
+		t.Error("a different secret must not verify")
+	}
+}
+
+// scriptServer builds a scripts dir with one `cat` endpoint and allows the
+// address httptest stamps on requests, so tests can go through ServeHTTP —
+// the IP gate and payload handling included.
+func scriptServer(t *testing.T, secrets map[string]string) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncat\n"
+	if err := os.WriteFile(filepath.Join(dir, "cat.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &Server{config: &Config{Milan: MilanConfig{
+		AllowedIPs: []string{"192.0.2.1"},
+		ScriptsDir: dir,
+		Secrets:    secrets,
+	}}}
+}
+
+func TestScriptPayloadOnStdin(t *testing.T) {
+	s := scriptServer(t, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/cat", strings.NewReader("hello stdin"))
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 200 || w.Body.String() != "hello stdin" {
+		t.Errorf("POST body did not reach stdin: %d %q", w.Code, w.Body.String())
+	}
+
+	// GET has no body; the script must see EOF, not block on a missing pipe.
+	r = httptest.NewRequest(http.MethodGet, "/cat", nil)
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 200 || w.Body.String() != "" {
+		t.Errorf("GET = %d %q, want 200 with empty body", w.Code, w.Body.String())
+	}
+}
+
+func TestScriptPayloadStreamsToStdin(t *testing.T) {
+	s := scriptServer(t, nil)
+	r := httptest.NewRequest(http.MethodPost, "/stream/cat", strings.NewReader("hello stdin"))
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "data: hello stdin") {
+		t.Errorf("stream = %d %q, want the payload as an SSE data event", w.Code, w.Body.String())
+	}
+}
+
+func TestScriptSecretGate(t *testing.T) {
+	s := scriptServer(t, map[string]string{"cat": "s3cr3t"})
+
+	cases := []struct {
+		name     string
+		method   string
+		body     string
+		sig      string
+		wantCode int
+	}{
+		{"signed POST", http.MethodPost, "hello stdin", sigHelloStdin, 200},
+		{"signed GET", http.MethodGet, "", sigEmptyBody, 200},
+		{"unsigned POST", http.MethodPost, "hello stdin", "", 403},
+		{"unsigned GET", http.MethodGet, "", "", 403},
+		{"tampered body", http.MethodPost, "hello stdim", sigHelloStdin, 403},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest(c.method, "/cat", strings.NewReader(c.body))
+			if c.sig != "" {
+				r.Header.Set("X-Hub-Signature-256", c.sig)
+			}
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, r)
+			if w.Code != c.wantCode {
+				t.Errorf("status = %d, want %d (body: %q)", w.Code, c.wantCode, w.Body.String())
+			}
+		})
+	}
+
+	// A script without an entry in secrets: stays open — opt-in, not global.
+	dir := s.config.Milan.ScriptsDir
+	if err := os.WriteFile(filepath.Join(dir, "open.sh"), []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/open", nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Errorf("unlisted script = %d, want 200", w.Code)
 	}
 }
 

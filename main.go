@@ -1,6 +1,6 @@
 package main
 
-// Milan — Minimalist Script Executor for macOS
+// Milan — Minimalist Script Executor for macOS and Linux
 //
 // Single binary: control commands + embedded HTTP server.
 //
@@ -16,8 +16,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -96,12 +101,14 @@ type NoteSource struct {
 }
 
 type MilanConfig struct {
-	Port         int          `yaml:"port"`
-	AllowedIPs   []string     `yaml:"allowed_ips"`
-	ScriptsDir   string       `yaml:"scripts_dir"`
-	CheatersDir  string       `yaml:"cheaters_dir"`
-	Notes        []NoteSource `yaml:"notes"`
-	CronInterval int          `yaml:"cron_interval"`
+	Port         int               `yaml:"port"`
+	Bind         string            `yaml:"bind"`
+	AllowedIPs   []string          `yaml:"allowed_ips"`
+	ScriptsDir   string            `yaml:"scripts_dir"`
+	CheatersDir  string            `yaml:"cheaters_dir"`
+	Secrets      map[string]string `yaml:"secrets"`
+	Notes        []NoteSource      `yaml:"notes"`
+	CronInterval int               `yaml:"cron_interval"`
 }
 
 type Config struct {
@@ -135,8 +142,33 @@ func loadConfig() (*Config, error) {
 	return &cfg, nil
 }
 
+// listenAddr is what serve binds. Empty bind keeps the historic behaviour —
+// all interfaces; anything else narrows the listener to that one address. On
+// a machine with a public interface that is the difference between "protected
+// by the firewall" and "not listening there at all".
+func (c *Config) listenAddr() string {
+	return net.JoinHostPort(c.Milan.Bind, strconv.Itoa(c.Milan.Port))
+}
+
+// controlURL is where the control commands (start's health poll, status)
+// reach their own server. Unbound, that is loopback; with bind set, loopback
+// no longer answers and the bind address is the only door in.
+func (c *Config) controlURL(path string) string {
+	host := c.Milan.Bind
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(c.Milan.Port)) + path
+}
+
 func (c *Config) allowed(ip string) bool {
 	if ip == "127.0.0.1" || ip == "::1" {
+		return true
+	}
+	// A machine calling its own bound address arrives with that address as
+	// the source — the same self-trust as loopback. Without this, bind would
+	// break every control command on a host whose own IP is not allowlisted.
+	if c.Milan.Bind != "" && ip == c.Milan.Bind {
 		return true
 	}
 	for _, pattern := range c.Milan.AllowedIPs {
@@ -211,6 +243,69 @@ func buildCmd(scriptPath, argument string) []string {
 		args = append(args, argument)
 	}
 	return args
+}
+
+// ─── Request payload ──────────────────────────────────────────────────────────
+
+// maxPayload caps what a caller can send to a script's stdin. Bodies are held
+// in memory for signature verification, so this cap is what stands between a
+// large POST and an OOM.
+const maxPayload = 10 << 20
+
+// readPayload drains the request body for a script route: the raw bytes
+// become the script's stdin, and — when the config lists a secret for this
+// script — they are what the caller's signature must match. Returns false
+// after having written the HTTP error itself.
+//
+// The scheme is GitHub's, so real webhook senders and a one-line openssl call
+// both work unchanged:
+//
+//	X-Hub-Signature-256: sha256=<hex hmac-sha256 of the raw body>
+//
+// The IP allowlist has already run at this point and stays in force: inside
+// the LAN the signature is a second factor, and for callers whose address
+// cannot be pinned (a cloud webhook arriving through the reverse proxy) the
+// proxy is what gets allowlisted while the signature does the real work.
+func (s *Server) readPayload(w http.ResponseWriter, r *http.Request, scriptName string) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxPayload))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			s.logf("warn", "%s: payload over %d bytes", scriptName, maxPayload)
+			http.Error(w, "Payload too large", http.StatusRequestEntityTooLarge)
+		} else {
+			s.logf("warn", "%s: payload read: %v", scriptName, err)
+			http.Error(w, "Body read error", http.StatusBadRequest)
+		}
+		return nil, false
+	}
+	secret := s.config.Milan.Secrets[scriptName]
+	if secret == "" {
+		return body, true
+	}
+	if !validSignature(secret, body, r.Header.Get("X-Hub-Signature-256")) {
+		s.logf("warn", "%s: bad or missing signature", scriptName)
+		http.Error(w, "Invalid signature", http.StatusForbidden)
+		return nil, false
+	}
+	return body, true
+}
+
+// validSignature checks a GitHub-style signature header against the raw body.
+// The comparison is constant-time; comparing the hex strings with == would
+// leak how many leading characters matched.
+func validSignature(secret string, body []byte, header string) bool {
+	hexSig, ok := strings.CutPrefix(header, "sha256=")
+	if !ok {
+		return false
+	}
+	got, err := hex.DecodeString(hexSig)
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return hmac.Equal(got, mac.Sum(nil))
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -296,6 +391,7 @@ func (s *Server) handleStatus(w http.ResponseWriter) {
 	writeJSON(w, map[string]any{
 		"service":           "milan",
 		"version":           version,
+		"listen":            s.config.listenAddr(),
 		"uptime_seconds":    int(uptime.Seconds()),
 		"requests":          s.requests.Load(),
 		"scripts_run":       s.scripts.Load(),
@@ -379,10 +475,14 @@ func (s *Server) executeScript(w http.ResponseWriter, r *http.Request, scriptNam
 		http.NotFound(w, r)
 		return
 	}
+	payload, ok := s.readPayload(w, r, scriptName)
+	if !ok {
+		return
+	}
 	s.logf("info", "%s -> %s(%s)", clientIP, scriptName, argument)
 
 	start := time.Now()
-	output, ok, timedOut := runScript(scriptPath, argument)
+	output, ok, timedOut := runScript(scriptPath, argument, payload)
 	dur := time.Since(start)
 	s.scripts.Add(1)
 
@@ -411,12 +511,15 @@ func isHTMLOutput(out string) bool {
 	return strings.HasPrefix(t, "<!DOCTYPE") || strings.HasPrefix(t, "<html")
 }
 
-func runScript(scriptPath, argument string) (output string, ok bool, timedOut bool) {
+func runScript(scriptPath, argument string, stdin []byte) (output string, ok bool, timedOut bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	args := buildCmd(scriptPath, argument)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	if len(stdin) > 0 {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	// Forked Hintergrundprozesse erben stdout — ohne WaitDelay würde
 	// CombinedOutput trotz Timeout auf Pipe-EOF warten.
 	cmd.WaitDelay = 2 * time.Second
@@ -448,6 +551,12 @@ func (s *Server) streamScript(w http.ResponseWriter, r *http.Request, scriptName
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 		return
 	}
+	// Before the SSE headers: a payload or signature error still goes out as a
+	// plain HTTP status here, not as a mislabeled event stream.
+	payload, ok := s.readPayload(w, r, scriptName)
+	if !ok {
+		return
+	}
 
 	s.logf("info", "%s ~> %s(%s) [stream]", clientIP, scriptName, argument)
 	s.scripts.Add(1)
@@ -472,6 +581,9 @@ func (s *Server) streamScript(w http.ResponseWriter, r *http.Request, scriptName
 	defer cancelRun()
 	cmd := exec.CommandContext(runCtx, args[0], args[1:]...)
 	cmd.WaitDelay = 5 * time.Second
+	if len(payload) > 0 {
+		cmd.Stdin = bytes.NewReader(payload)
+	}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 	if err := cmd.Start(); err != nil {
@@ -877,10 +989,10 @@ func serve() {
 	fmt.Printf("\033[36m\n")
 	fmt.Printf("╔═══════════════════════════════════════╗\n")
 	fmt.Printf("║          Milan v%-22s║\n", version)
-	fmt.Printf("║    Script Executor for macOS          ║\n")
+	fmt.Printf("║    Minimalist Script Executor         ║\n")
 	fmt.Printf("╚═══════════════════════════════════════╝\n")
 	fmt.Printf("\033[0m\n")
-	fmt.Printf("Port:        %d\n", cfg.Milan.Port)
+	fmt.Printf("Listen:      %s\n", cfg.listenAddr())
 	fmt.Printf("Scripts:     %s\n", cfg.Milan.ScriptsDir)
 	fmt.Printf("Allowed IPs: %s\n", strings.Join(cfg.Milan.AllowedIPs, ", "))
 	fmt.Printf("Ruby:        %s\n", rubyBin)
@@ -903,8 +1015,7 @@ func serve() {
 		os.Exit(0)
 	}()
 
-	addr := fmt.Sprintf(":%d", cfg.Milan.Port)
-	if err := http.ListenAndServe(addr, srv); err != nil {
+	if err := http.ListenAndServe(cfg.listenAddr(), srv); err != nil {
 		fmt.Fprintln(os.Stderr, "Server error:", err)
 		os.Exit(1)
 	}
@@ -962,8 +1073,8 @@ func isRunning() (int, bool) {
 	return pid, true
 }
 
-func portInUse(port int) bool {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+func portInUse(cfg *Config) bool {
+	ln, err := net.Listen("tcp", cfg.listenAddr())
 	if err != nil {
 		return true
 	}
@@ -1038,14 +1149,12 @@ func start(standalone bool) {
 		fmt.Println("Error:", err)
 		os.Exit(1)
 	}
-	port := cfg.Milan.Port
-
 	if pid, ok := isRunning(); ok {
 		fmt.Printf("Milan already running (PID %d)\n", pid)
 		return
 	}
-	if portInUse(port) {
-		fmt.Printf("Port %d in use — cannot start\n", port)
+	if portInUse(cfg) {
+		fmt.Printf("Address %s in use — cannot start\n", cfg.listenAddr())
 		if managedByLaunchd() {
 			fmt.Printf("Milan runs under launchd (%s) and is most likely already serving.\n", launchdTarget())
 			fmt.Printf("  restart:  launchctl kickstart -k %s\n", launchdTarget())
@@ -1095,7 +1204,7 @@ func start(standalone bool) {
 
 	// Poll /health
 	client := &http.Client{Timeout: time.Second}
-	healthURL := fmt.Sprintf("http://localhost:%d/health", port)
+	healthURL := cfg.controlURL("/health")
 	for i := 0; i < 8; i++ {
 		time.Sleep(500 * time.Millisecond)
 		if proc, err := os.FindProcess(pid); err == nil {
@@ -1198,7 +1307,7 @@ func waitForHealth() bool {
 		return false
 	}
 	client := &http.Client{Timeout: time.Second}
-	healthURL := fmt.Sprintf("http://localhost:%d/health", cfg.Milan.Port)
+	healthURL := cfg.controlURL("/health")
 	for i := 0; i < 8; i++ {
 		time.Sleep(500 * time.Millisecond)
 		if resp, err := client.Get(healthURL); err == nil {
@@ -1213,7 +1322,7 @@ func waitForHealth() bool {
 			}
 		}
 	}
-	fmt.Printf("Milan is not answering on port %d — check %s\n", cfg.Milan.Port, logPath)
+	fmt.Printf("Milan is not answering on %s — check %s\n", cfg.listenAddr(), logPath)
 	return false
 }
 
@@ -1230,7 +1339,7 @@ func status() {
 		return
 	}
 	client := &http.Client{Timeout: time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/", cfg.Milan.Port))
+	resp, err := client.Get(cfg.controlURL("/"))
 	if err != nil {
 		return
 	}
@@ -1238,6 +1347,11 @@ func status() {
 	var data map[string]any
 	if json.NewDecoder(resp.Body).Decode(&data) != nil {
 		return
+	}
+	// The first question when chasing a connection problem — from the server
+	// that answered, not from the config, which may have changed since.
+	if listen, _ := data["listen"].(string); listen != "" {
+		fmt.Printf("Listen: %s\n", listen)
 	}
 	fmt.Printf("Uptime: %vs | Requests: %v | Scripts: %v\n",
 		data["uptime_seconds"], data["requests"], data["scripts_run"])
