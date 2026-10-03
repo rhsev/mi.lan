@@ -10,6 +10,11 @@ PREFIX ?= /usr/local
 # Stamp the version from the tag rather than trusting a literal in main.go,
 # which shipped 2.2.0 as 2.1.0. A dirty or untagged tree says so in /status.
 VERSION := $(shell git describe --tags --dirty --always 2>/dev/null | sed 's/^v//')
+# Outside a checkout (a source tarball) describe says nothing, and an empty
+# -X would stamp an empty version; fall back to the variable's own default.
+ifeq ($(VERSION),)
+VERSION := dev
+endif
 LDFLAGS := -X main.version=$(VERSION)
 
 .PHONY: build install uninstall livesync reach link unlink test clean
