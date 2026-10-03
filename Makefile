@@ -7,13 +7,19 @@ PREFIX ?= /usr/local
 # health check, which lives in the machine-local scripts/custom/ and is built
 # rather than shipped. Convention: ../BUILD.md.
 
-.PHONY: build install uninstall livesync link unlink test clean
+.PHONY: build install uninstall livesync reach link unlink test clean
 
 build:
 	go build -o $(BIN) .
 
 livesync:
 	go build -o scripts/custom/livesync ./cmd/livesync
+
+# Same idea as livesync: the busiest endpoint, compiled. The extensionless
+# binary in scripts/custom/ takes precedence over reach.rb, which stays as the
+# reference for the ping flags and their measurements.
+reach:
+	go build -o scripts/custom/reach ./cmd/reach
 
 # Link once, then never again: rebuilding is deploying. A stale copy fails silently,
 # a dangling link fails at the next call.
