@@ -42,3 +42,17 @@ uninstall:
 
 clean:
 	rm -f $(BIN)
+	rm -rf dist
+
+# Cross-compiled release binaries, named as the README's Quick Start expects.
+# Pure Go with CGO off: each file is static, so one Linux binary covers every
+# distro, glibc or musl. dist/ is gitignored; the files attach to a release.
+RELEASE_TARGETS := darwin-arm64 darwin-amd64 linux-amd64 linux-arm64
+
+.PHONY: release
+release:
+	@mkdir -p dist
+	@for t in $(RELEASE_TARGETS); do \
+		echo "dist/$(BIN)-$$t"; \
+		GOOS=$${t%%-*} GOARCH=$${t##*-} CGO_ENABLED=0 go build -o dist/$(BIN)-$$t . || exit 1; \
+	done

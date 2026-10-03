@@ -7,3 +7,4 @@ data/
 scripts/custom/
 build.sh
 *.DS_Store
+/dist/
