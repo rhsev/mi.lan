@@ -1072,13 +1072,55 @@ func serve() {
 // (scripts/rhsev.milan.plist).
 const launchdLabel = "rhsev.milan"
 
-// managedByLaunchd reports whether that agent is loaded in this GUI domain.
-// It matters because launchd undoes every stop within the second: start and
-// stop are then not ours to issue, and pretending otherwise leaves the user
-// with "Stopped." followed by "Port 8080 in use".
+// launchdJobLoaded reports whether that agent is loaded in this GUI domain,
+// whichever binary it runs. Enough to explain a busy port, not to act on.
+func launchdJobLoaded() bool {
+	return exec.Command("launchctl", "print", launchdTarget()).Run() == nil
+}
+
+// managedByLaunchd reports whether this binary is the one that agent runs.
+// It matters because launchd undoes every stop within the second: stop and
+// restart are then not ours to issue, and pretending otherwise leaves the user
+// with "Stopped." followed by "Port 8080 in use". The label alone is not
+// enough: every other milan on the machine (a second checkout, a build in
+// dist/, a test instance) would take the agent for itself, refuse to stop, and
+// on restart kickstart the live one instead.
 func managedByLaunchd() bool {
-	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
-	return exec.Command("launchctl", "print", target).Run() == nil
+	out, err := exec.Command("launchctl", "print", launchdTarget()).Output()
+	if err != nil {
+		return false
+	}
+	self, _ := os.Executable()
+	return isLaunchdProgram(string(out), self)
+}
+
+// isLaunchdProgram decides from `launchctl print` output whether self is the
+// agent's program, comparing files rather than spellings so that a call
+// through the ~/bin symlink still counts. Output it cannot read keeps the
+// label's answer: wrongly claiming the agent costs a hint, wrongly disowning
+// it costs a stop that launchd undoes.
+func isLaunchdProgram(printOut, self string) bool {
+	prog := launchdProgram(printOut)
+	if prog == "" || self == "" {
+		return true
+	}
+	a, errA := os.Stat(prog)
+	b, errB := os.Stat(self)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return os.SameFile(a, b)
+}
+
+// launchdProgram returns the job's program path: the top-level `program = …`
+// line, one tab deep. Nested dictionaries sit deeper and are skipped.
+func launchdProgram(printOut string) string {
+	for _, line := range strings.Split(printOut, "\n") {
+		if v, ok := strings.CutPrefix(line, "\tprogram = "); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func launchdTarget() string {
@@ -1200,7 +1242,7 @@ func start(standalone bool) {
 	}
 	if portInUse(cfg) {
 		fmt.Printf("Address %s in use — cannot start\n", cfg.listenAddr())
-		if managedByLaunchd() {
+		if launchdJobLoaded() {
 			fmt.Printf("Milan runs under launchd (%s) and is most likely already serving.\n", launchdTarget())
 			fmt.Printf("  restart:  launchctl kickstart -k %s\n", launchdTarget())
 		}

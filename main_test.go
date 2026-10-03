@@ -497,3 +497,62 @@ func TestSignatureWarningOnAdHocBuild(t *testing.T) {
 		t.Fatalf("ad-hoc test binary not flagged, got %q", w)
 	}
 }
+
+// launchctl print output as macOS 15 writes it, trimmed. The nested
+// `program` line stands for any deeper dictionary that happens to use the key.
+const launchctlPrintSample = "gui/501/rhsev.milan = {\n" +
+	"\tactive count = 1\n" +
+	"\tpath = /Library/LaunchAgents/rhsev.milan.plist\n" +
+	"\tstate = running\n" +
+	"\n" +
+	"\tprogram = %s\n" +
+	"\targuments = {\n" +
+	"\t\t%s\n" +
+	"\t\tserve\n" +
+	"\t}\n" +
+	"\tevent triggers = {\n" +
+	"\t\tprogram = /usr/libexec/elsewhere\n" +
+	"\t}\n" +
+	"}\n"
+
+func TestLaunchdProgram(t *testing.T) {
+	out := strings.ReplaceAll(launchctlPrintSample, "%s", "/opt/milan/milan")
+	if got := launchdProgram(out); got != "/opt/milan/milan" {
+		t.Errorf("launchdProgram = %q, want /opt/milan/milan", got)
+	}
+	if got := launchdProgram("gui/501/x = {\n\t\tprogram = /deep\n}\n"); got != "" {
+		t.Errorf("nested program line taken: %q", got)
+	}
+}
+
+// The case that went wrong: a second milan on the same machine claimed the
+// live agent, so its restart kickstarted the wrong process.
+func TestIsLaunchdProgram(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live", "milan")
+	other := filepath.Join(dir, "probe", "milan")
+	link := filepath.Join(dir, "bin-milan")
+	for _, f := range []string{live, other} {
+		os.MkdirAll(filepath.Dir(f), 0o755)
+		os.WriteFile(f, []byte("bin"), 0o755)
+	}
+	os.Symlink(live, link)
+	out := strings.ReplaceAll(launchctlPrintSample, "%s", live)
+
+	cases := []struct {
+		name, out, self string
+		want            bool
+	}{
+		{"the agent's own binary", out, live, true},
+		{"through a symlink", out, link, true},
+		{"another copy", out, other, false},
+		{"agent's binary gone", strings.ReplaceAll(launchctlPrintSample, "%s", filepath.Join(dir, "gone")), live, false},
+		{"output without program line", "gui/501/rhsev.milan = {\n}\n", other, true},
+		{"own path unknown", out, "", true},
+	}
+	for _, c := range cases {
+		if got := isLaunchdProgram(c.out, c.self); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
