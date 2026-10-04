@@ -8,7 +8,7 @@ Milan is a HTTP agent designed to execute local scripts — and, on macOS, Apple
 
 It can do both:
 
-* Standalone: It works perfectly as a standalone tool on your Mac.
+* Standalone: It works as a standalone tool on a Mac or on a Linux server, where it makes a small, self-contained webhook target.
 * Companion: It connects with [dy.lan](https://github.com/rhsev/dy.lan) to act as the remote helper for your Mac, allowing you to trigger complex workflows from any device on your local (or Tailscale) network.
 
 ## Why Milan?
@@ -45,6 +45,14 @@ iPhone -> Dylan (Synology) -> Milan (Mac) -> Script -> Response
   works; `scripts/milan.service` is a systemd unit to start from
 * Ruby 3+ (to run `.rb` scripts)
 * Go 1.21+ — only if you build from source
+
+The dispatcher itself is platform-neutral: the test suite runs on Linux in
+CI, and a milan has been serving on an Ubuntu VPS since 2.3.0. What is
+macOS-only is the automation *around* it: Apple Shortcuts
+(`scripts/shortcut.rb`), the launchd awareness of the control commands, the
+urgent widgets passing through [ticker](https://github.com/rhsev/ticker),
+the `milan://` URL scheme. Everything else — scripts, streams, the widget
+inbox, background jobs, `bind:`, `secrets:` — behaves the same on both.
 
 ## Directory layout
 
