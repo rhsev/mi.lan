@@ -721,3 +721,113 @@ func TestWhoamiURL(t *testing.T) {
 		t.Error("malformed URL accepted")
 	}
 }
+
+// envMap turns a KEY=VALUE slice back into a map; a duplicate key is a bug in
+// buildScriptEnv (exec would hand the child both), so it fails the test.
+func envMap(t *testing.T, env []string) map[string]string {
+	t.Helper()
+	m := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		if _, dup := m[k]; dup {
+			t.Fatalf("duplicate %s in %v", k, env)
+		}
+		m[k] = v
+	}
+	return m
+}
+
+func TestScriptEnvLocaleDefault(t *testing.T) {
+	base := []string{"PATH=/usr/bin:/bin", "HOME=/h"}
+
+	if got := envMap(t, buildScriptEnv(base, ScriptEnv{}, "/h", "darwin"))["LANG"]; got != "en_US.UTF-8" {
+		t.Errorf("darwin without locale: LANG = %q, want en_US.UTF-8", got)
+	}
+	if got := envMap(t, buildScriptEnv(base, ScriptEnv{}, "/h", "linux"))["LANG"]; got != "C.UTF-8" {
+		t.Errorf("linux without locale: LANG = %q, want C.UTF-8", got)
+	}
+
+	// Any locale already present wins — milan only fills the gap.
+	for _, kv := range []string{"LANG=de_DE.UTF-8", "LC_ALL=fr_FR.UTF-8", "LC_CTYPE=UTF-8"} {
+		m := envMap(t, buildScriptEnv(append(base, kv), ScriptEnv{}, "/h", "darwin"))
+		k, v, _ := strings.Cut(kv, "=")
+		if m[k] != v {
+			t.Errorf("%s was changed to %q", kv, m[k])
+		}
+		if k != "LANG" && m["LANG"] != "" {
+			t.Errorf("with %s set, LANG was added anyway: %q", k, m["LANG"])
+		}
+	}
+
+	// A LANG from the config counts as present, too.
+	m := envMap(t, buildScriptEnv(base, ScriptEnv{Vars: map[string]string{"LANG": "de_DE.UTF-8"}}, "/h", "darwin"))
+	if m["LANG"] != "de_DE.UTF-8" {
+		t.Errorf("configured LANG overwritten: %q", m["LANG"])
+	}
+}
+
+func TestScriptEnvVars(t *testing.T) {
+	base := []string{"PATH=/usr/bin", "NOTES=/old", "KEEP=1"}
+	se := ScriptEnv{Vars: map[string]string{"NOTES": "~/Text", "BIN": "~/bin/register", "TILDE": "~", "PLAIN": "a~b"}}
+	m := envMap(t, buildScriptEnv(base, se, "/Users/u", "darwin"))
+
+	want := map[string]string{
+		"NOTES": "/Users/u/Text", // config overrides the inherited value
+		"BIN":   "/Users/u/bin/register",
+		"TILDE": "/Users/u",
+		"PLAIN": "a~b", // only a leading ~ expands
+		"KEEP":  "1",   // untouched inheritance stays
+	}
+	for k, v := range want {
+		if m[k] != v {
+			t.Errorf("%s = %q, want %q", k, m[k], v)
+		}
+	}
+}
+
+func TestScriptEnvPathPrepend(t *testing.T) {
+	se := ScriptEnv{PathPrepend: []string{"~/bin", "/opt/x", "/usr/bin"}}
+
+	m := envMap(t, buildScriptEnv([]string{"PATH=/usr/bin:/bin"}, se, "/Users/u", "darwin"))
+	// /usr/bin is already there and keeps its place instead of moving up.
+	if want := "/Users/u/bin:/opt/x:/usr/bin:/bin"; m["PATH"] != want {
+		t.Errorf("PATH = %q, want %q", m["PATH"], want)
+	}
+
+	m = envMap(t, buildScriptEnv(nil, ScriptEnv{PathPrepend: []string{"~/bin"}}, "/Users/u", "darwin"))
+	if want := "/Users/u/bin:/usr/bin:/bin:/usr/sbin:/sbin"; m["PATH"] != want {
+		t.Errorf("without inherited PATH: %q, want %q", m["PATH"], want)
+	}
+
+	m = envMap(t, buildScriptEnv([]string{"PATH=/usr/bin"}, ScriptEnv{}, "/Users/u", "darwin"))
+	if m["PATH"] != "/usr/bin" {
+		t.Errorf("no path_prepend changed PATH to %q", m["PATH"])
+	}
+}
+
+// The environment has to reach the script on every path milan runs one by:
+// a plain request and a stream (cron shares the same cmd.Env line).
+func TestScriptSeesScriptEnv(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s|%s' \"$MILAN_TEST_VAR\" \"$LANG\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "envtest.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	se := ScriptEnv{Vars: map[string]string{"MILAN_TEST_VAR": "~/x"}}
+	s := &Server{
+		config: &Config{Milan: MilanConfig{AllowedIPs: []string{"192.0.2.1"}, ScriptsDir: dir}},
+		env:    buildScriptEnv([]string{"PATH=/usr/bin:/bin"}, se, "/Users/u", "darwin"),
+	}
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/envtest", nil))
+	if w.Code != 200 || w.Body.String() != "/Users/u/x|en_US.UTF-8" {
+		t.Errorf("request: %d %q", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stream/envtest", nil))
+	if !strings.Contains(w.Body.String(), "data: /Users/u/x|en_US.UTF-8") {
+		t.Errorf("stream: %q", w.Body.String())
+	}
+}

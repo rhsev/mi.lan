@@ -36,3 +36,14 @@ milan:
   # Scripts without an entry stay open — opt-in, per endpoint.
   # secrets:
   #   deploy: "long-random-string"
+
+  # Environment for scripts, on top of milan's own (see "Script environment"
+  # in the README). A service manager starts milan with a sparse environment;
+  # this makes scripts see the same thing whether milan runs as a service or by
+  # hand. "~" expands to the home directory. Without a locale anywhere, milan
+  # adds LANG=en_US.UTF-8 (macOS) or C.UTF-8 by itself.
+  # script_env:
+  #   path_prepend: [~/bin]
+  #   vars:
+  #     GRUBBER_NOTES: ~/Notes
+  #     REGISTER_BIN: ~/bin/register

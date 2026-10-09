@@ -157,6 +157,7 @@ milan:
 | `scripts_dir` | `./scripts` | Directory for scripts, relative to the binary |
 | `secrets` | — | Per-script HMAC secrets (see [Signed requests](#signed-requests)) |
 | `notes` | — | List of note sources (see [Notes / Wiki](#notes--wiki)) |
+| `script_env` | — | Environment for scripts: `path_prepend` and `vars` (see [Script environment](#script-environment)) |
 
 ## Usage Examples
 
@@ -336,7 +337,34 @@ Rules:
 * POST body → stdin (capped at 10 MB)
 * stdout → HTTP response
 * Exit code != 0 → HTTP 422
+* Environment: milan's own, plus `script_env` and a UTF-8 locale (see below)
 * HTML output: escape every interpolated data value at render time (Ruby → `CGI.escapeHTML` / a small `h()` helper, Go → `html/template`, bash → don't build HTML with data). Dylan can't do it for you — by the time it has the assembled HTML, data and markup are already mixed. Scraped content (page titles, descriptions) is attacker-influenceable, so this is not optional for data-bearing HTML.
+
+### Script environment
+
+Scripts inherit milan's environment, and that depends on how milan was
+started. A launchd plist or a systemd unit is sparse — a short `PATH`, no
+locale — while a terminal is not. So a script can work when milan runs by hand
+and fail as a service: a tool in `~/bin` is not found, or Ruby reads a file
+name with an umlaut as ASCII and raises.
+
+`script_env` in `config.yaml` closes that gap the same way however milan runs,
+and keeps machine-specific paths out of the service definition:
+
+```yaml
+milan:
+  script_env:
+    path_prepend: [~/bin]          # in front of the inherited PATH
+    vars:                          # set or override
+      GRUBBER_NOTES: ~/Notes
+      REGISTER_BIN: ~/bin/register
+```
+
+A leading `~` expands to the home directory. One default needs no config: if
+none of `LC_ALL`, `LC_CTYPE` and `LANG` is set, scripts get
+`LANG=en_US.UTF-8` on macOS and `LANG=C.UTF-8` elsewhere. The startup banner
+shows what was added (variable names only — the section is a natural place for
+tokens, so values stay out of the log).
 
 ## Security
 

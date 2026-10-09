@@ -6,16 +6,16 @@
 #   ref://id/<id-or-aka>   — resolve via the register CLI, open the file, and
 #                            print its file:// URL.
 #
-# Environment (milan gives scripts a bare env; provide these in the LaunchAgent
-# plist, see scripts/rhsev.milan.plist):
+# Environment (set them under script_env in milan's config.yaml):
 #   GRUBBER_NOTES or GRUBBER_SET  — where the register index lives
 #   REGISTER_BIN                  — path to the register binary if it is not on PATH
 
 require "uri"
 require "open3"
 
-# milan starts scripts without LANG, so Ruby would read register's output as
-# US-ASCII and fail on the first non-ASCII path ("Pässe.md").
+# milan gives scripts a UTF-8 locale, but older milans and other launchers do
+# not; without one, Ruby reads register's output as US-ASCII and fails on the
+# first non-ASCII path ("Pässe.md").
 Encoding.default_external = Encoding::UTF_8
 
 REGISTER = ENV["REGISTER_BIN"] || "register"

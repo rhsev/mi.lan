@@ -115,6 +115,17 @@ type MilanConfig struct {
 	Secrets      map[string]string `yaml:"secrets"`
 	Notes        []NoteSource      `yaml:"notes"`
 	CronInterval int               `yaml:"cron_interval"`
+	ScriptEnv    ScriptEnv         `yaml:"script_env"`
+}
+
+// ScriptEnv is what scripts get on top of milan's own environment. That
+// environment depends on how milan was started — a launchd plist or systemd
+// unit is sparse, a terminal is not — so a script that works when milan runs
+// by hand can fail under the service manager. Settings here apply either way,
+// and they live in config.yaml rather than in a root-owned plist.
+type ScriptEnv struct {
+	PathPrepend []string          `yaml:"path_prepend"` // "~" expands to $HOME
+	Vars        map[string]string `yaml:"vars"`         // set or override; "~" expands
 }
 
 type Config struct {
@@ -229,6 +240,113 @@ var rubyBin = func() string {
 	return "ruby"
 }()
 
+// ─── Script environment ───────────────────────────────────────────────────────
+
+// buildScriptEnv returns the environment every script runs with: base (milan's
+// own), then the configured vars, then the configured PATH entries in front.
+//
+// One default on top: a service manager usually starts milan without any
+// locale, and then Ruby and Python read script output as ASCII and fail on the
+// first file name with an umlaut. If none of LC_ALL, LC_CTYPE and LANG is set
+// after the config is applied, LANG gets a UTF-8 locale — en_US.UTF-8 on
+// macOS, C.UTF-8 elsewhere (the one locale every glibc and musl system has).
+func buildScriptEnv(base []string, se ScriptEnv, home, goos string) []string {
+	expand := func(v string) string {
+		if v == "~" {
+			return home
+		}
+		if strings.HasPrefix(v, "~/") {
+			return filepath.Join(home, v[2:])
+		}
+		return v
+	}
+
+	var keys []string
+	vals := map[string]string{}
+	set := func(k, v string) {
+		if _, ok := vals[k]; !ok {
+			keys = append(keys, k)
+		}
+		vals[k] = v
+	}
+	for _, kv := range base {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			set(k, v)
+		}
+	}
+
+	names := make([]string, 0, len(se.Vars))
+	for k := range se.Vars {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		set(k, expand(se.Vars[k]))
+	}
+
+	if vals["LC_ALL"] == "" && vals["LC_CTYPE"] == "" && vals["LANG"] == "" {
+		if goos == "darwin" {
+			set("LANG", "en_US.UTF-8")
+		} else {
+			set("LANG", "C.UTF-8")
+		}
+	}
+
+	if len(se.PathPrepend) > 0 {
+		path := vals["PATH"]
+		if path == "" {
+			path = "/usr/bin:/bin:/usr/sbin:/sbin"
+		}
+		have := map[string]bool{}
+		for _, p := range strings.Split(path, ":") {
+			have[p] = true
+		}
+		var front []string
+		for _, p := range se.PathPrepend {
+			if p = expand(p); p != "" && !have[p] {
+				front = append(front, p)
+				have[p] = true
+			}
+		}
+		if len(front) > 0 {
+			set("PATH", strings.Join(front, ":")+":"+path)
+		}
+	}
+
+	env := make([]string, 0, len(keys))
+	for _, k := range keys {
+		env = append(env, k+"="+vals[k])
+	}
+	return env
+}
+
+// describeScriptEnv is the startup line: which PATH entries and variable names
+// the config adds, and the locale scripts end up with. Variable values stay
+// out of it — the section is a natural place for tokens.
+func describeScriptEnv(se ScriptEnv, env []string) string {
+	var parts []string
+	if len(se.PathPrepend) > 0 {
+		parts = append(parts, "PATH+ "+strings.Join(se.PathPrepend, ":"))
+	}
+	if len(se.Vars) > 0 {
+		names := make([]string, 0, len(se.Vars))
+		for k := range se.Vars {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		parts = append(parts, "vars "+strings.Join(names, ", "))
+	}
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "LANG=") {
+			parts = append(parts, kv)
+		}
+	}
+	if len(parts) == 0 {
+		return "inherited"
+	}
+	return strings.Join(parts, " · ")
+}
+
 // ─── Script helpers ───────────────────────────────────────────────────────────
 
 var scriptNameRE = regexp.MustCompile(`\A[\w-]+\z`)
@@ -325,6 +443,9 @@ type Server struct {
 	// signWarning is set at startup when the binary's code signature will not
 	// keep its macOS grants (see signatureWarning); empty otherwise.
 	signWarning string
+	// env is what every script runs with (see buildScriptEnv); nil inherits
+	// milan's own environment unchanged.
+	env []string
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -498,7 +619,7 @@ func (s *Server) executeScript(w http.ResponseWriter, r *http.Request, scriptNam
 	s.logf("info", "%s -> %s(%s)", clientIP, scriptName, argument)
 
 	start := time.Now()
-	output, ok, timedOut := runScript(scriptPath, argument, payload)
+	output, ok, timedOut := runScript(scriptPath, argument, payload, s.env)
 	dur := time.Since(start)
 	s.scripts.Add(1)
 
@@ -527,12 +648,13 @@ func isHTMLOutput(out string) bool {
 	return strings.HasPrefix(t, "<!DOCTYPE") || strings.HasPrefix(t, "<html")
 }
 
-func runScript(scriptPath, argument string, stdin []byte) (output string, ok bool, timedOut bool) {
+func runScript(scriptPath, argument string, stdin []byte, env []string) (output string, ok bool, timedOut bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	args := buildCmd(scriptPath, argument)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Env = env
 	if len(stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -596,6 +718,7 @@ func (s *Server) streamScript(w http.ResponseWriter, r *http.Request, scriptName
 	runCtx, cancelRun := context.WithTimeout(context.Background(), time.Hour)
 	defer cancelRun()
 	cmd := exec.CommandContext(runCtx, args[0], args[1:]...)
+	cmd.Env = s.env
 	cmd.WaitDelay = 5 * time.Second
 	if len(payload) > 0 {
 		cmd.Stdin = bytes.NewReader(payload)
@@ -965,6 +1088,7 @@ func (s *Server) startCron() {
 			// alle folgenden Ticks für immer.
 			ctx, cancel := context.WithTimeout(context.Background(), interval)
 			cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+			cmd.Env = s.env
 			cmd.WaitDelay = 5 * time.Second
 			if err := cmd.Run(); ctx.Err() == context.DeadlineExceeded {
 				s.logf("warn", "cron run timed out after %v", interval)
@@ -1028,6 +1152,8 @@ func serve() {
 	}
 
 	srv := &Server{config: cfg, startedAt: time.Now()}
+	home, _ := os.UserHomeDir()
+	srv.env = buildScriptEnv(os.Environ(), cfg.Milan.ScriptEnv, home, runtime.GOOS)
 
 	fmt.Printf("\033[36m\n")
 	fmt.Printf("╔═══════════════════════════════════════╗\n")
@@ -1039,6 +1165,7 @@ func serve() {
 	fmt.Printf("Scripts:     %s\n", cfg.Milan.ScriptsDir)
 	fmt.Printf("Allowed IPs: %s\n", strings.Join(cfg.Milan.AllowedIPs, ", "))
 	fmt.Printf("Ruby:        %s\n", rubyBin)
+	fmt.Printf("Script env:  %s\n", describeScriptEnv(cfg.Milan.ScriptEnv, srv.env))
 	if srv.signWarning = signatureWarning(); srv.signWarning != "" {
 		fmt.Printf("\033[33mWARNING:     %s\033[0m\n", srv.signWarning)
 	}

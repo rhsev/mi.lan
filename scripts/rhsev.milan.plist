@@ -55,13 +55,9 @@
 	<dict>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-		<!-- register-based scripts (scripts/id.rb) need the notes index, and the
-		     register binary if it is not on PATH. Uncomment and set your paths:
-		<key>GRUBBER_NOTES</key>
-		<string>/path/to/notes</string>
-		<key>REGISTER_BIN</key>
-		<string>/path/to/register</string>
-		-->
+		<!-- What scripts need beyond this (tool paths, GRUBBER_NOTES, …) goes
+		     into config.yaml under script_env, not here: it then applies the
+		     same when milan runs by hand, and changing it needs no sudo. -->
 	</dict>
 
 	<key>StandardOutPath</key>
