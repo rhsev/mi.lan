@@ -1304,9 +1304,14 @@ var dylanURL = func() string {
 	return "http://dy.lan/whoami"
 }()
 
-// localHostName is the machine's Bonjour name; a var so tests can stand in
-// for scutil.
+// localHostName is the machine's Bonjour name on macOS and the short host
+// name elsewhere (scutil does not exist there); a var so tests can stand in.
 var localHostName = func() (string, error) {
+	if runtime.GOOS != "darwin" {
+		h, err := os.Hostname()
+		short, _, _ := strings.Cut(h, ".")
+		return short, err
+	}
 	out, err := exec.Command("scutil", "--get", "LocalHostName").Output()
 	if err != nil {
 		return "", err
@@ -1323,7 +1328,7 @@ func ownName() (string, error) {
 	}
 	name, err := localHostName()
 	if err != nil {
-		return "", fmt.Errorf("no name in config.yaml and scutil failed: %w", err)
+		return "", fmt.Errorf("no name in config.yaml and no host name: %w", err)
 	}
 	if name == "" {
 		return "", errors.New("no name in config.yaml and LocalHostName is empty")

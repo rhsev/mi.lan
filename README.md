@@ -150,7 +150,7 @@ milan:
 
 | Key | Default | Description |
 |---|---|---|
-| `name` | LocalHostName, lower-cased | Agent name claimed at Dylan (see [Identity check](#identity-check)). Leave it unset in a `config.yaml` shared between machines |
+| `name` | LocalHostName, lower-cased (Linux: host name) | Agent name claimed at Dylan (see [Identity check](#identity-check)). Leave it unset in a `config.yaml` shared between machines |
 | `port` | `8080` | HTTP port Milan listens on |
 | `bind` | all interfaces | Single address to listen on, e.g. a Tailscale IP. Empty keeps the old behaviour |
 | `allowed_ips` | — | IPs allowed to trigger scripts. Wildcards supported (`192.168.1.*`). Localhost is always allowed |
@@ -426,7 +426,8 @@ where Dylan sends a request.
 `milan start`, `restart` and `whoami` tell Dylan who they are:
 `GET http://dy.lan/whoami?name=<name>` (or `$DYLAN_URL` with the name added).
 The name is `name:` from `config.yaml`, or else the machine's LocalHostName
-lower-cased, so a Mac called `Mini` claims `mini`. Dylan checks the claim
+lower-cased, so a Mac called `Mini` claims `mini` (on Linux: the short host
+name). Dylan checks the claim
 against its agent list:
 
 | Dylan answers | Meaning | milan |
