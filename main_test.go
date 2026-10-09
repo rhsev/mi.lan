@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -554,5 +556,168 @@ func TestIsLaunchdProgram(t *testing.T) {
 		if got := isLaunchdProgram(c.out, c.self); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// whoamiFixture points checkIdentity at a stand-in Dylan and a config dir of
+// its own, with scutil answering host ("" makes it fail). reply sees the name
+// milan sent and returns the status and body Dylan answers with.
+func whoamiFixture(t *testing.T, config, host string, reply func(name string) (int, string)) {
+	t.Helper()
+	dir := t.TempDir()
+	if config != "" {
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(config), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		code, body := reply(r.URL.Query().Get("name"))
+		w.WriteHeader(code)
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	oldBase, oldURL, oldHost := base, dylanURL, localHostName
+	base, dylanURL = dir, srv.URL+"/whoami"
+	localHostName = func() (string, error) {
+		if host == "" {
+			return "", errors.New("scutil: not found")
+		}
+		return host, nil
+	}
+	t.Cleanup(func() { base, dylanURL, localHostName = oldBase, oldURL, oldHost })
+}
+
+// captureStdout returns what fn printed — checkIdentity reports on stdout.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	return string(out)
+}
+
+// A name in config.yaml wins over the hostname, so a machine whose Bonjour
+// name differs from its agent name can still say who it is.
+func TestCheckIdentityNameFromConfig(t *testing.T) {
+	var sent string
+	whoamiFixture(t, "milan:\n  name: book\n", "Mini", func(name string) (int, string) {
+		sent = name
+		return http.StatusOK, name + " (192.168.1.187)"
+	})
+
+	var got string
+	var ok bool
+	out := captureStdout(t, func() { got, ok = checkIdentity() })
+	if sent != "book" {
+		t.Errorf("sent name %q, want book", sent)
+	}
+	if !ok || got != "book" {
+		t.Errorf("checkIdentity() = %q, %v, want book, true", got, ok)
+	}
+	if !strings.Contains(out, "OK - I am book (192.168.1.187)") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+// Without a name in config, LocalHostName is used — lower-cased, since macOS
+// reports "Mini" where Dylan's agent is keyed "mini".
+func TestCheckIdentityNameFromHostname(t *testing.T) {
+	var sent string
+	whoamiFixture(t, "", "Mini", func(name string) (int, string) {
+		sent = name
+		return http.StatusOK, name + " (192.168.1.118)"
+	})
+
+	var got string
+	var ok bool
+	captureStdout(t, func() { got, ok = checkIdentity() })
+	if sent != "mini" {
+		t.Errorf("sent name %q, want mini", sent)
+	}
+	if !ok || got != "mini" {
+		t.Errorf("checkIdentity() = %q, %v, want mini, true", got, ok)
+	}
+}
+
+// No name anywhere (Linux has no scutil): refuse instead of asking Dylan
+// without a claim.
+func TestCheckIdentityWithoutName(t *testing.T) {
+	asked := false
+	whoamiFixture(t, "", "", func(string) (int, string) {
+		asked = true
+		return http.StatusOK, "mini (192.168.1.118)"
+	})
+
+	var ok bool
+	out := captureStdout(t, func() { _, ok = checkIdentity() })
+	if ok || asked {
+		t.Errorf("ok = %v, asked Dylan = %v, want false, false", ok, asked)
+	}
+	if !strings.Contains(out, "FAILED (cannot determine own name") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+// The bug this pins: the MacBook bridged over the mini arrives NATed as
+// 192.168.1.118, Dylan answered by address alone, and milan took "mini" at
+// its word. An answer for another agent must stop it even when it is a 200.
+func TestCheckIdentityMismatch(t *testing.T) {
+	whoamiFixture(t, "milan:\n  name: book\n", "", func(string) (int, string) {
+		return http.StatusOK, "mini (192.168.1.118)"
+	})
+
+	var got string
+	var ok bool
+	out := captureStdout(t, func() { got, ok = checkIdentity() })
+	if ok || got != "" {
+		t.Errorf("checkIdentity() = %q, %v, want \"\", false", got, ok)
+	}
+	if want := "MISMATCH - Dylan identifies this host as mini, expected book"; !strings.Contains(out, want) {
+		t.Errorf("output = %q, want it to contain %q", out, want)
+	}
+}
+
+// A current Dylan refuses the claim itself; that stays a plain rejection.
+func TestCheckIdentityRejectedByDylan(t *testing.T) {
+	whoamiFixture(t, "milan:\n  name: book\n", "", func(string) (int, string) {
+		return http.StatusConflict, "book is registered at 192.168.1.187 but called from 192.168.1.118 (registered as mini)"
+	})
+
+	var ok bool
+	out := captureStdout(t, func() { _, ok = checkIdentity() })
+	if ok {
+		t.Error("checkIdentity() accepted a 409")
+	}
+	if !strings.Contains(out, "REJECTED (HTTP 409)") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+// DYLAN_URL can point anywhere, query included; the name is encoded into it.
+func TestWhoamiURL(t *testing.T) {
+	cases := []struct {
+		raw, name, want string
+	}{
+		{"http://dy.lan/whoami", "book", "http://dy.lan/whoami?name=book"},
+		{"http://192.168.1.33:8080/whoami", "mac mini&x", "http://192.168.1.33:8080/whoami?name=mac+mini%26x"},
+		{"http://dy.lan/whoami?debug=1", "book", "http://dy.lan/whoami?debug=1&name=book"},
+		{"http://dy.lan/whoami?name=mini", "book", "http://dy.lan/whoami?name=book"},
+	}
+	for _, c := range cases {
+		got, err := whoamiURL(c.raw, c.name)
+		if err != nil || got != c.want {
+			t.Errorf("whoamiURL(%q, %q) = %q, %v, want %q", c.raw, c.name, got, err, c.want)
+		}
+	}
+	if _, err := whoamiURL("http://dy.lan/%zz", "book"); err == nil {
+		t.Error("malformed URL accepted")
 	}
 }

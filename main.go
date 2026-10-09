@@ -106,6 +106,7 @@ type NoteSource struct {
 }
 
 type MilanConfig struct {
+	Name         string            `yaml:"name"` // agent name claimed at Dylan; see ownName
 	Port         int               `yaml:"port"`
 	Bind         string            `yaml:"bind"`
 	AllowedIPs   []string          `yaml:"allowed_ips"`
@@ -1176,11 +1177,66 @@ var dylanURL = func() string {
 	return "http://dy.lan/whoami"
 }()
 
+// localHostName is the machine's Bonjour name; a var so tests can stand in
+// for scutil.
+var localHostName = func() (string, error) {
+	out, err := exec.Command("scutil", "--get", "LocalHostName").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ownName is the agent name milan claims at Dylan: `name` from config.yaml,
+// else the LocalHostName. The latter is lower-cased — macOS reports "Mini"
+// where Dylan's agents are keyed "mini", and Bonjour names ignore case anyway.
+func ownName() (string, error) {
+	if cfg, err := loadConfig(); err == nil && cfg.Milan.Name != "" {
+		return cfg.Milan.Name, nil
+	}
+	name, err := localHostName()
+	if err != nil {
+		return "", fmt.Errorf("no name in config.yaml and scutil failed: %w", err)
+	}
+	if name == "" {
+		return "", errors.New("no name in config.yaml and LocalHostName is empty")
+	}
+	return strings.ToLower(name), nil
+}
+
+// whoamiURL adds the claimed name to the Dylan URL. Going through url.Parse
+// keeps a DYLAN_URL that already carries a query intact.
+func whoamiURL(raw, name string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("name", name)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
 func checkIdentity() (string, bool) {
 	if dylanURL == "" {
 		return "standalone", true
 	}
 	fmt.Print("Checking identity with Dylan... ")
+
+	// Dylan used to infer the agent from the source address alone. Behind NAT
+	// that is the router's address: the MacBook, bridged over the mini's
+	// Thunderbolt link, arrived as 192.168.1.118 and was told "you are mini".
+	// So milan states who it is, and Dylan confirms or refuses the claim.
+	name, err := ownName()
+	if err != nil {
+		fmt.Printf("FAILED (cannot determine own name: %v)\n", err)
+		return "", false
+	}
+	target, err := whoamiURL(dylanURL, name)
+	if err != nil {
+		fmt.Printf("FAILED (bad Dylan URL %q: %v)\n", dylanURL, err)
+		return "", false
+	}
 
 	// Retry once. The *first* outbound connection of a freshly started milan
 	// regularly needs longer than the 3 s budget, while every attempt after it
@@ -1193,9 +1249,8 @@ func checkIdentity() (string, bool) {
 	// up the identity check to work around a first-connection delay.
 	client := &http.Client{Timeout: 3 * time.Second}
 	var resp *http.Response
-	var err error
 	for attempt := 1; ; attempt++ {
-		resp, err = client.Get(dylanURL)
+		resp, err = client.Get(target)
 		if err == nil || attempt == identityAttempts {
 			break
 		}
@@ -1215,6 +1270,12 @@ func checkIdentity() (string, bool) {
 	fields := strings.Fields(identity)
 	if len(fields) == 0 {
 		fmt.Println("FAILED (empty response from Dylan)")
+		return "", false
+	}
+	// Dylan refuses a wrong claim itself (409). Checked here as well, so milan
+	// never runs under a name it did not claim — whatever answered the URL.
+	if fields[0] != name {
+		fmt.Printf("MISMATCH - Dylan identifies this host as %s, expected %s\n", fields[0], name)
 		return "", false
 	}
 	fmt.Printf("OK - I am %s\n", identity)
