@@ -14,6 +14,10 @@
 require "uri"
 require "open3"
 
+# milan starts scripts without LANG, so Ruby would read register's output as
+# US-ASCII and fail on the first non-ASCII path ("Pässe.md").
+Encoding.default_external = Encoding::UTF_8
+
 REGISTER = ENV["REGISTER_BIN"] || "register"
 
 def file_url(path)
