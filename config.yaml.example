@@ -2,6 +2,12 @@
 # Copy to config.yaml and adjust IPs
 
 milan:
+  # Agent name claimed at Dylan's /whoami?name= (see "Identity check" in the
+  # README). Default: the machine's LocalHostName, lower-cased ("Mini" → mini).
+  # Set it only where config.yaml is machine-local, e.g. on a VPS: a config
+  # synced between two Macs has to stay identical, and one name cannot fit both.
+  # name: mini
+
   port: 8080
 
   # IPs allowed to trigger scripts (e.g. Dylan master)

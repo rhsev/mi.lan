@@ -30,7 +30,7 @@ Milan creates a connection between your server and your client. It establishes a
 ### The Workflow
 
 1. Request: A client (like your iPhone) sends a request to the redirector (e.g., `http://mi.lan/mini/shortcut/Note`).
-2. Handshake: Before starting, the agent can ask the redirector "Who am I?" via `http://dy.lan/whoami` to ensure the bridge is correctly configured.
+2. Handshake: Before starting, the agent tells the redirector its name via `http://dy.lan/whoami?name=mini`, and the redirector confirms it against its agent list (see [Identity check](#identity-check)).
 3. Redirection: The hub recognizes the target agent ("mini") and passes the request to the specific Mac's IP (e.g., `192.168.1.118:8080`).
 4. Execution: The agent performs the local action and sends the result back.
 
@@ -106,9 +106,10 @@ the tools that travel with milan; clone or copy the ones you want, or write
 your own. An endpoint is any executable file dropped in `scripts_dir`.
 
 `--standalone` skips the identity check. Without it, `milan start` asks Dylan
-who it is and refuses to start when nobody answers. That is what you want once
-Dylan is on the network, and a dead end before that. Point `DYLAN_URL` at
-your own instance (default `http://dy.lan/whoami`) and drop the flag.
+to confirm its name and refuses to start when nobody answers or Dylan
+disagrees. That is what you want once Dylan is on the network, and a dead end
+before that. Point `DYLAN_URL` at your own instance (default
+`http://dy.lan/whoami`) and drop the flag.
 
 Or build from source instead of downloading:
 
@@ -149,6 +150,7 @@ milan:
 
 | Key | Default | Description |
 |---|---|---|
+| `name` | LocalHostName, lower-cased | Agent name claimed at Dylan (see [Identity check](#identity-check)). Leave it unset in a `config.yaml` shared between machines |
 | `port` | `8080` | HTTP port Milan listens on |
 | `bind` | all interfaces | Single address to listen on, e.g. a Tailscale IP. Empty keeps the old behaviour |
 | `allowed_ips` | — | IPs allowed to trigger scripts. Wildcards supported (`192.168.1.*`). Localhost is always allowed |
@@ -387,6 +389,45 @@ http://mi.lan/mini/hello/World  ->  Mac Mini: GET /hello/World
 http://mi.lan/book/shortcut/Note  ->  MacBook: GET /shortcut/Note
 
 ```
+
+Routing goes by these URLs alone. The identity check below never changes
+where Dylan sends a request.
+
+### Identity check
+
+`milan start`, `restart` and `whoami` tell Dylan who they are:
+`GET http://dy.lan/whoami?name=<name>` (or `$DYLAN_URL` with the name added).
+The name is `name:` from `config.yaml`, or else the machine's LocalHostName
+lower-cased, so a Mac called `Mini` claims `mini`. Dylan checks the claim
+against its agent list:
+
+| Dylan answers | Meaning | milan |
+|---|---|---|
+| `200 mini (192.168.1.118)` | the claim matches the caller's address | `OK - I am mini (192.168.1.118)` |
+| `404 Unknown agent: x` | no agent of that name | refuses to start |
+| `409 book is registered at … but called from …` | the claim comes from another address | refuses to start |
+
+milan also refuses a 200 that names an agent other than the one it claimed.
+
+Behind NAT the caller's address is the router's. A MacBook on a Thunderbolt
+cable to the mini reaches Dylan with the mini's address, and used to be told
+"you are mini". List that address for it on Dylan, and it starts as itself
+with Wi-Fi on or off:
+
+```yaml
+milan:
+  whoami_also_from:
+    book: ["192.168.1.118"]
+```
+
+Such an OK says who the caller is, not that Dylan can reach it. On the cable
+the MacBook's milan serves only locally (`milan://` links through ticker),
+and becomes reachable for Dylan again as soon as Wi-Fi brings its address
+back, without a restart.
+
+Deploy Dylan before milan: a Dylan older than the name check does not route
+`/whoami?name=` and answers 404. The other way round works, since a current
+Dylan still answers an old milan that sends no name, by address alone.
 
 ## License
 
