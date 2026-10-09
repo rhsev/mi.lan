@@ -254,14 +254,15 @@ var tickerBin = func() string {
 // tickerSend fires the event once per urgent push, on arrival. Not
 // configurable in phase 1 — first find out whether it gets annoying.
 func (s *Server) tickerSend(text string) {
-	if tickerBin == "" {
+	bin := tickerBin
+	if bin == "" {
 		s.logf("warn", "urgent widget but no ticker binary found")
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := exec.CommandContext(ctx, tickerBin, "--send", text).Run(); err != nil {
+		if err := exec.CommandContext(ctx, bin, "--send", text).Run(); err != nil {
 			s.logf("warn", "ticker --send failed: %v", err)
 		}
 	}()
