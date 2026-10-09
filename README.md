@@ -464,4 +464,4 @@ MIT
 
 ---
 
-*Part of a family of plain-text tools — the [profile page](https://github.com/rhsev) has the map.*
+*Part of a family of plain-text tools. See the [profile page](https://github.com/rhsev) for an overview.*
