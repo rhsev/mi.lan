@@ -204,7 +204,7 @@ func TestBuildCmd(t *testing.T) {
 	// The argument becomes its own argv entry — no shell is involved, so it
 	// cannot be reinterpreted as a command here.
 	got := buildCmd("/s/cl.rb", "file/x; rm -rf /")
-	want := []string{rubyBin, "/s/cl.rb", "file/x; rm -rf /"}
+	want := []string{rubyBin(), "/s/cl.rb", "file/x; rm -rf /"}
 	if len(got) != len(want) {
 		t.Fatalf("buildCmd = %v, want %v", got, want)
 	}
@@ -282,8 +282,8 @@ func TestFindScriptPrecedence(t *testing.T) {
 	if got := buildCmd(filepath.Join(custom, "both"), "")[0]; got != filepath.Join(custom, "both") {
 		t.Errorf("buildCmd(binary)[0] = %q, want the binary itself", got)
 	}
-	if got := buildCmd(filepath.Join(custom, "onlyrb.rb"), "")[0]; got != rubyBin {
-		t.Errorf("buildCmd(.rb)[0] = %q, want %q", got, rubyBin)
+	if got := buildCmd(filepath.Join(custom, "onlyrb.rb"), "")[0]; got != rubyBin() {
+		t.Errorf("buildCmd(.rb)[0] = %q, want %q", got, rubyBin())
 	}
 
 	list := s.listScripts()
@@ -912,5 +912,30 @@ func TestStreamStartFailureIsAnHTTPError(t *testing.T) {
 	}
 	if ct := w.Header().Get("Content-Type"); strings.Contains(ct, "event-stream") {
 		t.Errorf("content type = %q, want no event stream", ct)
+	}
+}
+
+func TestMatchIP(t *testing.T) {
+	cases := []struct {
+		pattern, ip string
+		want        bool
+	}{
+		{"192.168.1.5", "192.168.1.5", true},
+		{"192.168.1.5", "192.168.1.50", false},
+		{"192.168.1.*", "192.168.1.118", true},
+		{"192.168.1.*", "192.168.1.", false},   // the star needs a digit
+		{"192.168.1.*", "192.168.10.5", false}, // and does not cross a dot
+		{"192.168.1.*", "192.168.1.5.6", false},
+		{"192.168.*.*", "192.168.20.7", true},
+		{"192.168.*.1", "192.168.20.1", true},
+		{"192.168.*.1", "192.168.20.2", false},
+		{"10.0.0.1*", "10.0.0.12", true},
+		{"10.0.0.1*", "10.0.0.1", false},
+		{"*", "", false},
+	}
+	for _, c := range cases {
+		if got := matchIP(c.pattern, c.ip); got != c.want {
+			t.Errorf("matchIP(%q, %q) = %v, want %v", c.pattern, c.ip, got, c.want)
+		}
 	}
 }

@@ -111,7 +111,6 @@ type MilanConfig struct {
 	Bind         string            `yaml:"bind"`
 	AllowedIPs   []string          `yaml:"allowed_ips"`
 	ScriptsDir   string            `yaml:"scripts_dir"`
-	CheatersDir  string            `yaml:"cheaters_dir"`
 	Secrets      map[string]string `yaml:"secrets"`
 	Notes        []NoteSource      `yaml:"notes"`
 	CronInterval int               `yaml:"cron_interval"`
@@ -189,12 +188,32 @@ func (c *Config) allowed(ip string) bool {
 		return true
 	}
 	for _, pattern := range c.Milan.AllowedIPs {
-		if strings.Contains(pattern, "*") {
-			re := `^` + strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, `\d+`) + `$`
-			if ok, _ := regexp.MatchString(re, ip); ok {
-				return true
-			}
-		} else if pattern == ip {
+		if matchIP(pattern, ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchIP compares an address with an allowlist entry, in which "*" stands
+// for one or more digits ("192.168.1.*"). Written out by hand: the regexp it
+// replaces was compiled anew for every entry on every request.
+func matchIP(pattern, ip string) bool {
+	star := strings.IndexByte(pattern, '*')
+	if star < 0 {
+		return pattern == ip
+	}
+	if !strings.HasPrefix(ip, pattern[:star]) {
+		return false
+	}
+	rest, tail := ip[star:], pattern[star+1:]
+	digits := 0
+	for digits < len(rest) && rest[digits] >= '0' && rest[digits] <= '9' {
+		digits++
+	}
+	// The star takes at least one digit; try every length, longest first.
+	for n := digits; n >= 1; n-- {
+		if matchIP(tail, rest[n:]) {
 			return true
 		}
 	}
@@ -203,7 +222,9 @@ func (c *Config) allowed(ip string) bool {
 
 // ─── Ruby discovery ───────────────────────────────────────────────────────────
 
-var rubyBin = func() string {
+// rubyBin is looked up on first use. As a package variable it ran
+// `ruby --version` at the start of every milan command, `status` included.
+var rubyBin = sync.OnceValue(func() string {
 	// If PATH ruby is already >= 3, use it as-is.
 	if out, err := exec.Command("ruby", "--version").Output(); err == nil {
 		s := string(out)
@@ -238,7 +259,7 @@ var rubyBin = func() string {
 		}
 	}
 	return "ruby"
-}()
+})
 
 // ─── Script environment ───────────────────────────────────────────────────────
 
@@ -355,7 +376,7 @@ func buildCmd(scriptPath, argument string) []string {
 	var args []string
 	switch strings.ToLower(filepath.Ext(scriptPath)) {
 	case ".rb":
-		args = []string{rubyBin, scriptPath}
+		args = []string{rubyBin(), scriptPath}
 	case ".sh":
 		args = []string{"sh", scriptPath}
 	case ".py":
@@ -1227,7 +1248,7 @@ func serve() {
 	fmt.Printf("Listen:      %s\n", cfg.listenAddr())
 	fmt.Printf("Scripts:     %s\n", cfg.Milan.ScriptsDir)
 	fmt.Printf("Allowed IPs: %s\n", strings.Join(cfg.Milan.AllowedIPs, ", "))
-	fmt.Printf("Ruby:        %s\n", rubyBin)
+	fmt.Printf("Ruby:        %s\n", rubyBin())
 	fmt.Printf("Script env:  %s\n", describeScriptEnv(cfg.Milan.ScriptEnv, srv.env))
 	if srv.signWarning = signatureWarning(); srv.signWarning != "" {
 		fmt.Printf("\033[33mWARNING:     %s\033[0m\n", srv.signWarning)
@@ -1423,9 +1444,6 @@ func whoamiURL(raw, name string) (string, error) {
 }
 
 func checkIdentity() (string, bool) {
-	if dylanURL == "" {
-		return "standalone", true
-	}
 	fmt.Print("Checking identity with Dylan... ")
 
 	// Dylan used to infer the agent from the source address alone. Behind NAT
@@ -1515,12 +1533,8 @@ func start(standalone bool) {
 		os.Exit(1)
 	}
 
-	var identity string
-	if standalone {
-		identity = "standalone"
-	} else {
-		var ok bool
-		if identity, ok = checkIdentity(); !ok {
+	if !standalone {
+		if _, ok := checkIdentity(); !ok {
 			os.Exit(1)
 		}
 	}
@@ -1544,7 +1558,6 @@ func start(standalone bool) {
 	cmd.Dir = base
 	cmd.Stdout = logF
 	cmd.Stderr = logF
-	cmd.Env = append(os.Environ(), "MILAN_IDENTITY="+identity)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {

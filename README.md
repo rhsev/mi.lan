@@ -412,10 +412,12 @@ With the `35-milan-connect.rb` plugin, requests are routed through Dylan:
 ```
 http://mi.lan/mini/hello/World  ->  Mac Mini: GET /hello/World
 http://mi.lan/book/shortcut/Note  ->  MacBook: GET /shortcut/Note
+http://mi.lan/mini/stream/backup  ->  Mac Mini: GET /stream/backup, line by line
 
 ```
 
-Routing goes by these URLs alone. The identity check below never changes
+Dylan forwards GET, POST, PUT and DELETE with the request body and passes the
+status back unchanged. Routing goes by these URLs alone. The identity check below never changes
 where Dylan sends a request.
 
 ### Identity check
