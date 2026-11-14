@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The two boundaries worth pinning are the IP gate and the notes path handling;
@@ -102,6 +103,13 @@ func notesServer(t *testing.T) (*Server, string) {
 	write(filepath.Join(root, "secret.html"), "TOP SECRET")
 	write(filepath.Join(dir, "note.html"), "<h1>note</h1>")
 	write(filepath.Join(dir, "images", "logo.png"), "PNG")
+	// A rendered album: <album>/albums/<slug>/<file>.
+	album := filepath.Join(dir, "Grüße", "albums", "gruesse")
+	if err := os.MkdirAll(album, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(album, "1234.jpg"), "JPEG")
+	write(filepath.Join(album, ".hidden"), "TOP SECRET")
 
 	return &Server{config: &Config{Milan: MilanConfig{
 		Notes: []NoteSource{{ID: "src", Path: dir}},
@@ -134,6 +142,13 @@ func TestHandleNotes(t *testing.T) {
 		{"asset encoded traversal", "/notes/src/assets/images%2F..%2F..%2Fsecret.html", 403, ""},
 		{"asset literal traversal", "/notes/src/assets/../secret.html", 403, ""},
 		{"asset outside images", "/notes/src/assets/secret.html", 403, ""},
+
+		// Album folders: exactly <album>/albums/<slug>/<file>, nothing looser.
+		{"album asset", "/notes/src/assets/Gr%C3%BC%C3%9Fe/albums/gruesse/1234.jpg", 200, "JPEG"},
+		{"album hidden file", "/notes/src/assets/Gr%C3%BC%C3%9Fe/albums/gruesse/.hidden", 403, ""},
+		{"album traversal", "/notes/src/assets/Gr%C3%BC%C3%9Fe/albums/../../../secret.html", 403, ""},
+		{"album encoded traversal", "/notes/src/assets/x/albums/..%2F..%2F..%2Fsecret.html/y", 403, ""},
+		{"album too shallow", "/notes/src/assets/albums/gruesse/1234.jpg", 403, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -160,6 +175,8 @@ func TestSplitScriptPath(t *testing.T) {
 		{"cl/file/664435710", "cl", "file/664435710"},
 		{"album/safari/fresh", "album", "safari/fresh"},
 		{"cl/files/Mein%20Binder", "cl", "files/Mein Binder"}, // argument is decoded
+		{"hello/50%25", "hello", "50%"},                       // once: a literal % survives
+		{"hello/a%2541", "hello", "a%41"},
 		{"", "", ""},
 	}
 	for _, c := range cases {
@@ -351,6 +368,28 @@ func TestScriptPayloadOnStdin(t *testing.T) {
 	s.ServeHTTP(w, r)
 	if w.Code != 200 || w.Body.String() != "" {
 		t.Errorf("GET = %d %q, want 200 with empty body", w.Code, w.Body.String())
+	}
+}
+
+// The argument is decoded once on its way from the request line to the script.
+// It used to be decoded twice, which dropped an argument with a literal "%".
+func TestScriptArgumentDecodedOnce(t *testing.T) {
+	s := scriptServer(t, nil)
+	echo := "#!/bin/sh\nprintf '%s' \"$1\"\n"
+	if err := os.WriteFile(filepath.Join(s.config.Milan.ScriptsDir, "echo.sh"), []byte(echo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"/echo/a%20b":  "a b",
+		"/echo/50%25":  "50%",
+		"/echo/a%2541": "a%41",
+	} {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != 200 || w.Body.String() != want {
+			t.Errorf("GET %s = %d %q, want 200 %q", path, w.Code, w.Body.String(), want)
+		}
 	}
 }
 
@@ -829,5 +868,49 @@ func TestScriptSeesScriptEnv(t *testing.T) {
 	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stream/envtest", nil))
 	if !strings.Contains(w.Body.String(), "data: /Users/u/x|en_US.UTF-8") {
 		t.Errorf("stream: %q", w.Body.String())
+	}
+}
+
+// A timeout ends the script and what it started. The script backgrounds a
+// child that would write a marker after the timeout; with only the script
+// killed, the marker appeared.
+func TestTimeoutKillsTheWholeGroup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for the 5s script timeout")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "marker")
+	script := filepath.Join(dir, "slow.sh")
+	body := "#!/bin/sh\n(sleep 7; touch " + marker + ") &\nsleep 30\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, ok, timedOut := runScript(script, "", nil, nil)
+	if ok || !timedOut {
+		t.Fatalf("ok=%v timedOut=%v, want a timeout", ok, timedOut)
+	}
+	time.Sleep(3 * time.Second)
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the script's child outlived the timeout")
+	}
+}
+
+// A script that cannot start answers with a plain 500, not with an event
+// stream that ends without an event.
+func TestStreamStartFailureIsAnHTTPError(t *testing.T) {
+	s := scriptServer(t, nil)
+	// Executable, no extension, not a program: exec fails on it.
+	bad := filepath.Join(s.config.Milan.ScriptsDir, "broken")
+	if err := os.WriteFile(bad, []byte("\x00\x01 not a program"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/stream/broken", nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 (body: %q)", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); strings.Contains(ct, "event-stream") {
+		t.Errorf("content type = %q, want no event stream", ct)
 	}
 }

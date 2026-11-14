@@ -369,6 +369,44 @@ func buildCmd(scriptPath, argument string) []string {
 	return args
 }
 
+// ─── Process groups ───────────────────────────────────────────────────────────
+
+// running holds the process group of every script that is still running,
+// keyed by pid (a group leader's pid is its group id).
+var running sync.Map
+
+// ownGroup gives a script its own process group and makes the timeout kill
+// the whole group. Killing only the script left its children running: `sh`
+// died, the `sleep` or `rsync` it had started did not.
+func ownGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
+
+// runTracked starts cmd, waits for it and keeps its group in `running`
+// meanwhile, so that a stopping milan can take its scripts with it.
+func runTracked(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	pid := cmd.Process.Pid
+	running.Store(pid, struct{}{})
+	defer running.Delete(pid)
+	return cmd.Wait()
+}
+
+// stopRunning ends every script still running. In their own groups they are
+// out of reach of the terminal's Ctrl-C and of launchd's cleanup, which both
+// act on milan's group.
+func stopRunning() {
+	running.Range(func(pid, _ any) bool {
+		syscall.Kill(-pid.(int), syscall.SIGTERM)
+		return true
+	})
+}
+
 // ─── Request payload ──────────────────────────────────────────────────────────
 
 // maxPayload caps what a caller can send to a script's stdin. Bodies are held
@@ -468,6 +506,11 @@ func extractIP(r *http.Request) string {
 
 func (s *Server) route(w http.ResponseWriter, r *http.Request, ip string) {
 	p := r.URL.Path
+	// Routes that take a caller's text out of the path (script arguments, note
+	// names, job ids) split the still-escaped path and decode each part once.
+	// r.URL.Path is already decoded; decoding it again dropped every argument
+	// with a literal "%" and turned "%2541" into "A".
+	ep := r.URL.EscapedPath()
 	switch {
 	case p == "/" || p == "/status":
 		s.handleStatus(w)
@@ -484,7 +527,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, ip string) {
 	case p == "/jobs" || p == "/jobs/all":
 		writeJSON(w, s.allJobs())
 	case strings.HasPrefix(p, "/jobs/ack/"):
-		jobID, _ := url.PathUnescape(strings.TrimPrefix(p, "/jobs/ack/"))
+		jobID, _ := url.PathUnescape(strings.TrimPrefix(ep, "/jobs/ack/"))
 		s.acknowledgeJob(jobID)
 		fmt.Fprintf(w, "acknowledged: %s", jobID)
 	case p == "/widgets":
@@ -494,13 +537,13 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, ip string) {
 	case p == "/notes":
 		writeJSON(w, s.listNoteSources())
 	case strings.HasPrefix(p, "/notes/"):
-		s.handleNotes(w, r, p)
+		s.handleNotes(w, r, ep)
 	case strings.HasPrefix(p, "/stream/"):
-		rest := strings.TrimPrefix(p, "/stream/")
+		rest := strings.TrimPrefix(ep, "/stream/")
 		scriptName, arg := splitScriptPath(rest)
 		s.streamScript(w, r, scriptName, arg, ip)
 	default:
-		rest := strings.TrimPrefix(p, "/")
+		rest := strings.TrimPrefix(ep, "/")
 		scriptName, arg := splitScriptPath(rest)
 		if scriptName == "" {
 			http.NotFound(w, r)
@@ -510,6 +553,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, ip string) {
 	}
 }
 
+// splitScriptPath takes the escaped path below the route prefix.
 func splitScriptPath(rest string) (script, arg string) {
 	parts := strings.SplitN(rest, "/", 2)
 	script = parts[0]
@@ -644,8 +688,9 @@ func (s *Server) executeScript(w http.ResponseWriter, r *http.Request, scriptNam
 // Scripts may return full HTML pages (e.g. the fileregister album script);
 // sniff the prefix so browsers render them instead of showing source.
 func isHTMLOutput(out string) bool {
-	t := strings.TrimSpace(out)
-	return strings.HasPrefix(t, "<!DOCTYPE") || strings.HasPrefix(t, "<html")
+	// Case-insensitive: Hugo's minifier writes "<!doctype html>".
+	t := strings.ToLower(strings.TrimSpace(out[:min(len(out), 64)]))
+	return strings.HasPrefix(t, "<!doctype") || strings.HasPrefix(t, "<html")
 }
 
 func runScript(scriptPath, argument string, stdin []byte, env []string) (output string, ok bool, timedOut bool) {
@@ -659,10 +704,14 @@ func runScript(scriptPath, argument string, stdin []byte, env []string) (output 
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	// Forked Hintergrundprozesse erben stdout — ohne WaitDelay würde
-	// CombinedOutput trotz Timeout auf Pipe-EOF warten.
+	// Wait trotz Timeout auf Pipe-EOF warten.
 	cmd.WaitDelay = 2 * time.Second
-	out, err := cmd.CombinedOutput()
-	output = strings.TrimSpace(string(out))
+	ownGroup(cmd)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := runTracked(cmd)
+	output = strings.TrimSpace(out.String())
 
 	if ctx.Err() == context.DeadlineExceeded {
 		return "Timeout (>5s)", false, true
@@ -699,15 +748,13 @@ func (s *Server) streamScript(w http.ResponseWriter, r *http.Request, scriptName
 	s.logf("info", "%s ~> %s(%s) [stream]", clientIP, scriptName, argument)
 	s.scripts.Add(1)
 
-	w.Header().Set("Content-Type", "text/event-stream; charset=UTF-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
+	// The script starts before the SSE headers go out. A script that cannot
+	// start is then a plain 500; after the headers it was an event stream that
+	// ended without an event, which the pad showed as a clean finish.
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		s.logf("error", "Pipe error: %v", err)
+		http.Error(w, "Cannot start script: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -725,13 +772,23 @@ func (s *Server) streamScript(w http.ResponseWriter, r *http.Request, scriptName
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
+	ownGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		pw.Close()
 		pr.Close()
 		s.logf("error", "Start error: %v", err)
+		http.Error(w, "Cannot start script: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	pw.Close()
+	running.Store(cmd.Process.Pid, struct{}{})
+	defer running.Delete(cmd.Process.Pid)
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=UTF-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	ctx := r.Context()
 	silent := false
@@ -968,6 +1025,11 @@ func (s *Server) listNotes(dir string) []string {
 var (
 	safeFilenameRE = regexp.MustCompile(`\A[\w. -]+\z`)
 	safeAssetRE    = regexp.MustCompile(`\A(images|css)/[\w. -]+\z`)
+	// A rendered album (album-kit) is a folder per album inside the source:
+	// <album>/albums/<slug>/<file>. Letters beyond ASCII are allowed in the two
+	// names a person chose; no part may start with a dot, so neither ".." nor
+	// a hidden file gets through.
+	safeAlbumAssetRE = regexp.MustCompile(`\A[\p{L}\p{N}_ -][\p{L}\p{N}_. -]*/albums/[\p{L}\p{N}_ -][\p{L}\p{N}_. -]*/[\w-][\w. -]*\z`)
 )
 
 func (s *Server) serveNote(w http.ResponseWriter, dir, filename string, sourceExists bool) {
@@ -1017,7 +1079,7 @@ func (s *Server) serveNoteAsset(w http.ResponseWriter, dir, assetPath string, so
 		http.Error(w, "Source not found", http.StatusNotFound)
 		return
 	}
-	if !safeAssetRE.MatchString(assetPath) {
+	if !safeAssetRE.MatchString(assetPath) && !safeAlbumAssetRE.MatchString(assetPath) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -1090,7 +1152,8 @@ func (s *Server) startCron() {
 			cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 			cmd.Env = s.env
 			cmd.WaitDelay = 5 * time.Second
-			if err := cmd.Run(); ctx.Err() == context.DeadlineExceeded {
+			ownGroup(cmd)
+			if err := runTracked(cmd); ctx.Err() == context.DeadlineExceeded {
 				s.logf("warn", "cron run timed out after %v", interval)
 			} else if err != nil {
 				s.logf("warn", "cron run failed: %v", err)
@@ -1171,6 +1234,15 @@ func serve() {
 	}
 	fmt.Println(strings.Repeat("─", 40))
 
+	// Bind before anything else claims to be running. A second `serve` on a
+	// busy port used to write its own pid into the pidfile first and then exit,
+	// after which `milan status` said "not running" about the milan that was.
+	ln, err := net.Listen("tcp", cfg.listenAddr())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Server error:", err)
+		os.Exit(1)
+	}
+
 	srv.startCron()
 
 	// Claim the pidfile here, not only in start(). Under launchd, `serve` is
@@ -1183,12 +1255,13 @@ func serve() {
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-stop
+		stopRunning()
 		removePidFileIf(os.Getpid())
 		fmt.Println("\nMilan stopped.")
 		os.Exit(0)
 	}()
 
-	if err := http.ListenAndServe(cfg.listenAddr(), srv); err != nil {
+	if err := http.Serve(ln, srv); err != nil {
 		fmt.Fprintln(os.Stderr, "Server error:", err)
 		os.Exit(1)
 	}
