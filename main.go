@@ -341,6 +341,28 @@ func buildScriptEnv(base []string, se ScriptEnv, home, goos string) []string {
 	return env
 }
 
+// lookPathIn finds name on the PATH of env, the way a shell started with that
+// environment would. exec.Command looks only at milan's own PATH. Not found
+// returns name unchanged, so the caller gets the usual "not found" error.
+func lookPathIn(env []string, name string) string {
+	path := ""
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		if info, err := os.Stat(p); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return name
+}
+
 // describeScriptEnv is the startup line: which PATH entries and variable names
 // the config adds, and the locale scripts end up with. Variable values stay
 // out of it — the section is a natural place for tokens.
@@ -923,11 +945,38 @@ func (s *Server) recordJob(jobID, scriptName string, exitOK bool, logFilePath st
 		Log:    logFilePath,
 		TS:     time.Now().Format(time.RFC3339),
 	})
-	if len(jobs) > 100 {
-		jobs = jobs[len(jobs)-100:]
+	if len(jobs) > maxJobs {
+		jobs = jobs[len(jobs)-maxJobs:]
 	}
 	data, _ := json.Marshal(jobs)
 	atomicWrite(statusFile, data)
+	pruneJobLogs(jobsDir, jobs)
+}
+
+// maxJobs is how many finished background jobs the list keeps.
+const maxJobs = 100
+
+// pruneJobLogs removes the log files of jobs that are no longer in the list.
+// Without it the list stayed at maxJobs while the logs piled up for good.
+// Only *.log directly in dir is touched; a log still being written belongs to
+// a job that is not recorded yet, so anything younger than a day is left.
+func pruneJobLogs(dir string, jobs []Job) {
+	keep := map[string]bool{}
+	for _, j := range jobs {
+		keep[filepath.Base(j.Log)] = true
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || filepath.Ext(name) != ".log" || keep[name] {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) < 24*time.Hour {
+			continue
+		}
+		os.Remove(filepath.Join(dir, name))
+	}
 }
 
 func (s *Server) allJobs() []Job {
@@ -1044,13 +1093,16 @@ func (s *Server) listNotes(dir string) []string {
 }
 
 var (
-	safeFilenameRE = regexp.MustCompile(`\A[\w. -]+\z`)
+	// A note's file name: letters and digits of any script, with combining
+	// marks because macOS hands out decomposed names ("u" plus diaeresis). It
+	// may not start with a dot, like the listing, which hides such files.
+	safeFilenameRE = regexp.MustCompile(`\A[\p{L}\p{N}_][\p{L}\p{N}\p{M}_. -]*\z`)
 	safeAssetRE    = regexp.MustCompile(`\A(images|css)/[\w. -]+\z`)
 	// A rendered album (album-kit) is a folder per album inside the source:
 	// <album>/albums/<slug>/<file>. Letters beyond ASCII are allowed in the two
 	// names a person chose; no part may start with a dot, so neither ".." nor
 	// a hidden file gets through.
-	safeAlbumAssetRE = regexp.MustCompile(`\A[\p{L}\p{N}_ -][\p{L}\p{N}_. -]*/albums/[\p{L}\p{N}_ -][\p{L}\p{N}_. -]*/[\w-][\w. -]*\z`)
+	safeAlbumAssetRE = regexp.MustCompile(`\A[\p{L}\p{N}_ -][\p{L}\p{N}\p{M}_. -]*/albums/[\p{L}\p{N}_ -][\p{L}\p{N}\p{M}_. -]*/[\w-][\w. -]*\z`)
 )
 
 func (s *Server) serveNote(w http.ResponseWriter, dir, filename string, sourceExists bool) {
@@ -1077,10 +1129,20 @@ func (s *Server) serveNote(w http.ResponseWriter, dir, filename string, sourceEx
 		if idx := strings.Index(md, "%%%END"); idx >= 0 {
 			md = strings.TrimSpace(md[idx+6:])
 		}
-		cmd := exec.Command("apex", "--mode", "gfm")
+		// Same environment as the scripts, and apex looked up on their PATH:
+		// under launchd milan's own PATH is short, and a renderer installed
+		// where script_env points was "not found".
+		cmd := exec.Command(lookPathIn(s.env, "apex"), "--mode", "gfm")
+		cmd.Env = s.env
 		cmd.Stdin = strings.NewReader(md)
 		out, err := cmd.Output()
 		if err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				s.logf("warn", "apex failed on %s: %s", name, strings.TrimSpace(string(exit.Stderr)))
+				http.Error(w, "apex failed to render this note", http.StatusInternalServerError)
+				return
+			}
 			http.Error(w, "apex not found — gem install apex", http.StatusServiceUnavailable)
 			return
 		}
@@ -1239,6 +1301,18 @@ func serve() {
 	home, _ := os.UserHomeDir()
 	srv.env = buildScriptEnv(os.Environ(), cfg.Milan.ScriptEnv, home, runtime.GOOS)
 
+	// Bind before anything else claims to be running. A second `serve` on a
+	// busy port used to write its own pid into the pidfile first and then exit,
+	// after which `milan status` said "not running" about the milan that was.
+	// Before the banner too: launchd retries a failed start every ten seconds,
+	// and a milan started by hand next to the agent once filled the log with
+	// 12,848 banners in two days. A failed start is now one line.
+	ln, err := net.Listen("tcp", cfg.listenAddr())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] ERROR Server error: %v\n", time.Now().Format("15:04:05"), err)
+		os.Exit(1)
+	}
+
 	fmt.Printf("\033[36m\n")
 	fmt.Printf("╔═══════════════════════════════════════╗\n")
 	fmt.Printf("║          Milan v%-22s║\n", version)
@@ -1254,15 +1328,6 @@ func serve() {
 		fmt.Printf("\033[33mWARNING:     %s\033[0m\n", srv.signWarning)
 	}
 	fmt.Println(strings.Repeat("─", 40))
-
-	// Bind before anything else claims to be running. A second `serve` on a
-	// busy port used to write its own pid into the pidfile first and then exit,
-	// after which `milan status` said "not running" about the milan that was.
-	ln, err := net.Listen("tcp", cfg.listenAddr())
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Server error:", err)
-		os.Exit(1)
-	}
 
 	srv.startCron()
 

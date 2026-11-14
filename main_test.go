@@ -135,10 +135,8 @@ func TestHandleNotes(t *testing.T) {
 		// an encoded slash is the interesting case — it cannot reappear as a
 		// separator, and neither variant may reach secret.html.
 		{"encoded traversal", "/notes/src/..%2F..%2Fsecret.html", 404, ""},
-		// ".." alone passes safeFilenameRE (dots are in the class); what stops
-		// it is that reading the resulting directory fails. Worth knowing if
-		// the filename check is ever rewritten.
-		{"literal traversal", "/notes/src/../secret.html", 404, ""},
+		// ".." is refused by safeFilenameRE: a name may not start with a dot.
+		{"literal traversal", "/notes/src/../secret.html", 400, ""},
 		{"asset encoded traversal", "/notes/src/assets/images%2F..%2F..%2Fsecret.html", 403, ""},
 		{"asset literal traversal", "/notes/src/assets/../secret.html", 403, ""},
 		{"asset outside images", "/notes/src/assets/secret.html", 403, ""},
@@ -937,5 +935,68 @@ func TestMatchIP(t *testing.T) {
 		if got := matchIP(c.pattern, c.ip); got != c.want {
 			t.Errorf("matchIP(%q, %q) = %v, want %v", c.pattern, c.ip, got, c.want)
 		}
+	}
+}
+
+func TestPruneJobLogs(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-48 * time.Hour)
+	write := func(name string, aged bool) {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, []byte("x"), 0o644)
+		if aged {
+			os.Chtimes(p, old, old)
+		}
+	}
+	write("kept_1.log", true)     // still in the list
+	write("orphan_1.log", true)   // dropped from the list
+	write("running_1.log", false) // not recorded yet
+	write("status.json", true)    // never a candidate
+
+	pruneJobLogs(dir, []Job{{ID: "kept_1", Log: filepath.Join(dir, "kept_1.log")}})
+
+	for name, want := range map[string]bool{
+		"kept_1.log": true, "orphan_1.log": false, "running_1.log": true, "status.json": true,
+	} {
+		_, err := os.Stat(filepath.Join(dir, name))
+		if got := err == nil; got != want {
+			t.Errorf("%s: exists = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestSafeFilename(t *testing.T) {
+	for name, want := range map[string]bool{
+		"note.md":      true,
+		"Über uns.md":  true, // composed
+		"Über uns.md": true, // decomposed, as macOS lists it
+		"日記 2026.html": true,
+		".hidden.md":   false,
+		"..":           false,
+		"a/b.md":       false,
+		"a\\b.md":      false,
+		"":             false,
+	} {
+		if got := safeFilenameRE.MatchString(name); got != want {
+			t.Errorf("%q: got %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestLookPathIn(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "zz-tool")
+	os.WriteFile(tool, []byte("#!/bin/sh\n"), 0o755)
+	os.WriteFile(filepath.Join(dir, "zz-plain"), []byte("x"), 0o644)
+
+	env := []string{"HOME=/nowhere", "PATH=/zz-missing:" + dir}
+	if got := lookPathIn(env, "zz-tool"); got != tool {
+		t.Errorf("found %q, want %q", got, tool)
+	}
+	if got := lookPathIn(env, "zz-plain"); got != "zz-plain" {
+		t.Errorf("a file without the executable bit was taken: %q", got)
+	}
+	if got := lookPathIn(nil, "zz-tool"); got != "zz-tool" {
+		t.Errorf("no PATH: got %q", got)
 	}
 }
